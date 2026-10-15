@@ -38,7 +38,7 @@ session.headers.update({
 
 
 # ==========================================
-# HELPER ROUTING FUNCTIONS
+# HELPER ROUTING & GEOMETRY FUNCTIONS
 # ==========================================
 @st.cache_data(show_spinner=False)
 def resolve_google_maps_url(url):
@@ -80,6 +80,23 @@ def resolve_google_maps_url(url):
         pass
 
     return None, None
+
+
+@st.cache_data(show_spinner=False)
+def get_osrm_route_geometry(coords_latlon):
+    """Fetch road-following polyline from OSRM; sticks directly to actual streets."""
+    if len(coords_latlon) < 2:
+        return coords_latlon
+    coord_str = ";".join(f"{lon:.6f},{lat:.6f}" for lat, lon in coords_latlon)
+    url = f"http://router.project-osrm.org/route/v1/driving/{coord_str}?overview=full&geometries=geojson"
+    try:
+        resp = session.get(url, timeout=15).json()
+        if resp.get("code") == "Ok" and resp.get("routes"):
+            geojson_coords = resp["routes"][0]["geometry"]["coordinates"]
+            return [(lat, lon) for lon, lat in geojson_coords]
+    except Exception:
+        pass
+    return coords_latlon
 
 
 def identify_uae_city(lat, lon):
@@ -258,7 +275,6 @@ def build_balanced_morning_routes(dist_matrix, valid_stops, target_drivers, max_
                 return True
         return False
 
-    # 1. Lock same-city clusters
     same_city_pairs = []
     for i in range(1, num_stops + 1):
         for j in range(i + 1, num_stops + 1):
@@ -271,7 +287,6 @@ def build_balanced_morning_routes(dist_matrix, valid_stops, target_drivers, max_
     for _, i, j in same_city_pairs:
         try_merge(i, j, require_same_city=True)
 
-    # 2. Merge corridors down to target drivers
     while len(routes) > target_drivers:
         best_pair, best_score = None, -float("inf")
         for a in range(len(routes)):
@@ -295,7 +310,6 @@ def build_balanced_morning_routes(dist_matrix, valid_stops, target_drivers, max_
         else:
             break
 
-    # 3. Absorb 1-5 bag routes
     changed = True
     while changed and len(routes) > 1:
         changed = False
@@ -325,7 +339,6 @@ def build_balanced_morning_routes(dist_matrix, valid_stops, target_drivers, max_
                 routes = [optimize_route_order(r, dist_matrix)[0] for r in temp]
                 changed = True
 
-    # 4. Highway relief
     while True:
         best_t, best_d = None, float("inf")
         for l_idx, l_r in enumerate(routes):
@@ -389,14 +402,12 @@ if uploaded_file is None:
     st.info("👋 Upload today's scraped `lion_delivery_all_bags.csv` in the sidebar to generate routes.")
     st.stop()
 
-# Load CSV data
 content = uploaded_file.getvalue().decode("utf-8-sig").splitlines()
 reader = csv.DictReader(content)
 raw_rows = list(reader)
 fieldnames = reader.fieldnames or []
 bag_col = fieldnames[0] if fieldnames else "Bag_Number"
 
-# Run optimization and cache in Session State
 if "dispatch_data" not in st.session_state or st.sidebar.button("🔄 Re-Run Full Route Optimization"):
     with st.spinner("Resolving delivery coordinates and generating corridor clusters..."):
         resolved, unresolvable = [], []
@@ -484,7 +495,6 @@ if "dispatch_data" not in st.session_state or st.sidebar.button("🔄 Re-Run Ful
 
 master_rows = st.session_state["dispatch_data"]
 
-# Display KPIs
 active_driver_ids = sorted(list(set(r["Driver_ID"] for r in master_rows if "NOT GOING" not in r["Driver_ID"] and r["Driver_ID"] != "UNASSIGNED")))
 total_bags_assigned = sum(int(float(r.get("Bags", 1) or 1)) for r in master_rows if "NOT GOING" not in r["Driver_ID"])
 excluded_bags = [r for r in master_rows if "NOT GOING" in r["Driver_ID"]]
@@ -495,7 +505,6 @@ kpi2.metric("Total Bags Assigned", total_bags_assigned)
 kpi3.metric("Resting Drivers", 7 - len(active_driver_ids))
 kpi4.metric("Excluded Stops (>180 km)", len(excluded_bags))
 
-# Stop Reassignment UI
 st.subheader("Manual Stop Adjustment")
 col_re1, col_re2, col_re3 = st.columns([3, 2, 1.5])
 
@@ -515,7 +524,7 @@ if col_re3.button("Move & Recalculate"):
         st.success(f"Moved bag to {target_driver_choice}!")
         st.rerun()
 
-# Build Map
+# Build Map with Snap-to-Roads
 m = folium.Map(location=[wh_lat, wh_lon], zoom_start=9, tiles=None, control_scale=True)
 Fullscreen(position="topleft").add_to(m)
 
@@ -527,8 +536,11 @@ for d_idx, d_name in enumerate(active_driver_ids):
     d_stops = [r for r in master_rows if r["Driver_ID"] == d_name]
     d_stops.sort(key=lambda x: int(x["Stop_Sequence"]))
 
-    pts = [(wh_lat, wh_lon)] + [(float(s["Resolved_Lat"]), float(s["Resolved_Lon"])) for s in d_stops]
-    AntPath(locations=pts, color=color, weight=4, opacity=0.85).add_to(m)
+    waypoints = [(wh_lat, wh_lon)] + [(float(s["Resolved_Lat"]), float(s["Resolved_Lon"])) for s in d_stops]
+    
+    # Snap route lines to actual road curves using OSRM
+    road_polyline = get_osrm_route_geometry(waypoints)
+    AntPath(locations=road_polyline, color=color, weight=4, opacity=0.85).add_to(m)
 
     for s in d_stops:
         badge = folium.DivIcon(
@@ -542,6 +554,7 @@ for d_idx, d_name in enumerate(active_driver_ids):
             icon=badge
         ).add_to(m)
 
+# Render Map
 st_folium(m, width="100%", height=520)
 
 # CSV Export
