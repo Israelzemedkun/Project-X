@@ -2,3 +2,6 @@ streamlit
 streamlit-folium
 folium
 requests
+ortools
+scikit-learn
+numpy
