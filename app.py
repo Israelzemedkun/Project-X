@@ -21,6 +21,10 @@ st.set_page_config(
 WAREHOUSE_URL = "https://maps.app.goo.gl/KxepQZ1YGK4qYeND7"
 DISTANT_CITIES = {"Al Ain", "Abu Dhabi", "Fujairah / East Coast", "Ras Al Khaimah"}
 
+# UAE Safe Highway Waypoints (Used to pull routes away from Oman border corridors)
+UAE_MASAFI_WAYPOINT = (25.3180, 56.1660)   # Forces East Coast routes through E88/E84 inside UAE
+UAE_MADAM_WAYPOINT = (24.9600, 55.7600)    # Forces central routes through E102/E55 inside UAE
+
 DRIVER_COLORS = [
     "#e6194B",  # Red
     "#3cb44b",  # Green
@@ -38,7 +42,43 @@ session.headers.update({
 
 
 # ==========================================
-# HELPER ROUTING & GEOMETRY FUNCTIONS
+# 1. BORDER CONTROL & UAE GEOFENCING
+# ==========================================
+def is_in_oman(lat, lon):
+    """
+    Detect if a coordinate lies inside Oman territory or enclaves bordering the UAE:
+    1. Madha Enclave (Omani territory surrounded by Fujairah/Sharjah)
+    2. Musandam & Dibba Al-Baya (Oman territory north of RAK/Fujairah)
+    3. Al Buraimi & Mahdah (Oman territory directly east of Al Ain)
+    4. East of Hatta / Al Wajajah border checkpoint
+    """
+    # 1. Madha Enclave (Oman enclave surrounded by Fujairah/Sharjah)
+    if 25.240 <= lat <= 25.345 and 56.270 <= lon <= 56.380:
+        return True
+
+    # 2. Musandam Peninsula & Dibba Al-Baya (North of UAE)
+    if lat >= 26.04:
+        return True
+    if lat >= 25.620 and lon >= 56.275:
+        return True
+
+    # 3. Al Buraimi & Mahdah (Oman immediately east of Al Ain border)
+    if 24.15 <= lat <= 24.45 and lon >= 55.775:
+        return True
+
+    # 4. East of Hatta / Wajajah border checkpoint
+    if 24.78 <= lat <= 24.88 and lon >= 56.140:
+        return True
+
+    # 5. General South/East of UAE border fence
+    if lat < 24.0 and lon >= 55.80:
+        return True
+
+    return False
+
+
+# ==========================================
+# 2. HELPER ROUTING & GEOMETRY FUNCTIONS
 # ==========================================
 @st.cache_data(show_spinner=False)
 def resolve_google_maps_url(url):
@@ -84,19 +124,40 @@ def resolve_google_maps_url(url):
 
 @st.cache_data(show_spinner=False)
 def get_osrm_route_geometry(coords_latlon):
-    """Fetch road-following polyline from OSRM; sticks directly to actual streets."""
+    """
+    Fetch road-following polyline from OSRM. If any part of the route attempts
+    to cut through Oman (e.g. Madha or Buraimi), re-route through internal UAE highways.
+    """
     if len(coords_latlon) < 2:
         return coords_latlon
-    coord_str = ";".join(f"{lon:.6f},{lat:.6f}" for lat, lon in coords_latlon)
-    url = f"http://router.project-osrm.org/route/v1/driving/{coord_str}?overview=full&geometries=geojson"
-    try:
-        resp = session.get(url, timeout=15).json()
-        if resp.get("code") == "Ok" and resp.get("routes"):
-            geojson_coords = resp["routes"][0]["geometry"]["coordinates"]
-            return [(lat, lon) for lon, lat in geojson_coords]
-    except Exception:
-        pass
-    return coords_latlon
+
+    def query_osrm(pts):
+        coord_str = ";".join(f"{lon:.6f},{lat:.6f}" for lat, lon in pts)
+        url = f"http://router.project-osrm.org/route/v1/driving/{coord_str}?overview=full&geometries=geojson"
+        try:
+            resp = session.get(url, timeout=15).json()
+            if resp.get("code") == "Ok" and resp.get("routes"):
+                geojson_coords = resp["routes"][0]["geometry"]["coordinates"]
+                return [(lat, lon) for lon, lat in geojson_coords]
+        except Exception:
+            pass
+        return pts
+
+    raw_path = query_osrm(coords_latlon)
+
+    # Check if the generated polyline crosses into Oman
+    crosses_oman = any(is_in_oman(lat, lon) for lat, lon in raw_path)
+    if crosses_oman:
+        # Inject safe UAE highway waypoint (Masafi or Madam) to force UAE-only path
+        safe_waypoints = [coords_latlon[0]]
+        for pt in coords_latlon[1:]:
+            if pt[1] >= 56.0:  # Heading towards East Coast
+                safe_waypoints.append(UAE_MASAFI_WAYPOINT)
+            safe_waypoints.append(pt)
+        safe_path = query_osrm(safe_waypoints)
+        return [pt for pt in safe_path if not is_in_oman(pt[0], pt[1])]
+
+    return raw_path
 
 
 def identify_uae_city(lat, lon):
@@ -370,9 +431,14 @@ def build_balanced_morning_routes(dist_matrix, valid_stops, target_drivers, max_
 
 
 def build_google_maps_nav_link(wh_lat, wh_lon, stops):
-    pts = [f"{wh_lat:.6f},{wh_lon:.6f}"] + [
-        f"{float(s['Resolved_Lat']):.6f},{float(s['Resolved_Lon']):.6f}" for s in stops[:10]
-    ]
+    """Build multi-stop Google Maps navigation URL with UAE waypoint protection."""
+    pts = [f"{wh_lat:.6f},{wh_lon:.6f}"]
+    for s in stops[:9]:
+        lat, lon = float(s['Resolved_Lat']), float(s['Resolved_Lon'])
+        # Inject Masafi pass-through if heading to East Coast to keep Google Maps navigation inside UAE
+        if lon >= 56.0 and f"{UAE_MASAFI_WAYPOINT[0]},{UAE_MASAFI_WAYPOINT[1]}" not in pts:
+            pts.append(f"{UAE_MASAFI_WAYPOINT[0]:.6f},{UAE_MASAFI_WAYPOINT[1]:.6f}")
+        pts.append(f"{lat:.6f},{lon:.6f}")
     return "https://www.google.com/maps/dir/" + "/".join(pts)
 
 
@@ -409,20 +475,30 @@ fieldnames = reader.fieldnames or []
 bag_col = fieldnames[0] if fieldnames else "Bag_Number"
 
 if "dispatch_data" not in st.session_state or st.sidebar.button("🔄 Re-Run Full Route Optimization"):
-    with st.spinner("Resolving delivery coordinates and generating corridor clusters..."):
-        resolved, unresolvable = [], []
+    with st.spinner("Resolving coordinates, applying Oman border filter, and generating routes..."):
+        resolved, unresolvable, oman_stops = [], [], []
         url_col = next((c for c in fieldnames if any(k in c.lower() for k in ["url", "link", "map", "location"])), None)
 
         for row in raw_rows:
             lat, lon = resolve_google_maps_url(row.get(url_col, ""))
             if lat and lon:
-                resolved.append({
-                    "row_data": row,
-                    "lat": lat,
-                    "lon": lon,
-                    "bags": int(float(row.get("Bags", 1) or 1)),
-                    "city": identify_uae_city(lat, lon)
-                })
+                # Check if pin itself is outside UAE (in Oman)
+                if is_in_oman(lat, lon):
+                    oman_stops.append({
+                        "row_data": row,
+                        "lat": lat,
+                        "lon": lon,
+                        "city": "Oman Territory / Border",
+                        "bags": int(float(row.get("Bags", 1) or 1))
+                    })
+                else:
+                    resolved.append({
+                        "row_data": row,
+                        "lat": lat,
+                        "lon": lon,
+                        "bags": int(float(row.get("Bags", 1) or 1)),
+                        "city": identify_uae_city(lat, lon)
+                    })
             else:
                 unresolvable.append(row)
 
@@ -475,6 +551,7 @@ if "dispatch_data" not in st.session_state or st.sidebar.button("🔄 Re-Run Ful
                 })
                 final_rows.append(item)
 
+        # Append >180 km stops
         for fs in far_stops:
             item = dict(fs["row_data"])
             item.update({
@@ -491,20 +568,40 @@ if "dispatch_data" not in st.session_state or st.sidebar.button("🔄 Re-Run Ful
             })
             final_rows.append(item)
 
+        # Append Oman / Outside UAE stops
+        for os_stop in oman_stops:
+            item = dict(os_stop["row_data"])
+            item.update({
+                "Driver_ID": "NOT GOING - OUTSIDE UAE (OMAN)",
+                "Stop_Sequence": "",
+                "City_Area": "Oman Territory",
+                "Warehouse_Road_KM": "",
+                "Leg_Distance_KM": "",
+                "Route_Total_Bags": "",
+                "Route_OneWay_KM": "",
+                "Resolved_Lat": round(os_stop["lat"], 6),
+                "Resolved_Lon": round(os_stop["lon"], 6),
+                "Dispatch_Status": "EXCLUDED_OUTSIDE_UAE"
+            })
+            final_rows.append(item)
+
         st.session_state["dispatch_data"] = final_rows
 
 master_rows = st.session_state["dispatch_data"]
 
+# Display KPIs
 active_driver_ids = sorted(list(set(r["Driver_ID"] for r in master_rows if "NOT GOING" not in r["Driver_ID"] and r["Driver_ID"] != "UNASSIGNED")))
 total_bags_assigned = sum(int(float(r.get("Bags", 1) or 1)) for r in master_rows if "NOT GOING" not in r["Driver_ID"])
 excluded_bags = [r for r in master_rows if "NOT GOING" in r["Driver_ID"]]
+oman_excluded = [r for r in master_rows if "OMAN" in r["Driver_ID"]]
 
 kpi1, kpi2, kpi3, kpi4 = st.columns(4)
-kpi1.metric("Active Drivers Today", f"{len(active_driver_ids)} / {7}")
+kpi1.metric("Active Drivers Today", f"{len(active_driver_ids)} / 7")
 kpi2.metric("Total Bags Assigned", total_bags_assigned)
 kpi3.metric("Resting Drivers", 7 - len(active_driver_ids))
-kpi4.metric("Excluded Stops (>180 km)", len(excluded_bags))
+kpi4.metric("Excluded Stops", f"{len(excluded_bags)} ({len(oman_excluded)} Oman)")
 
+# Stop Reassignment UI
 st.subheader("Manual Stop Adjustment")
 col_re1, col_re2, col_re3 = st.columns([3, 2, 1.5])
 
@@ -514,7 +611,7 @@ bag_options = [
 ]
 
 selected_bag_idx = col_re1.selectbox("Select Bag to Reassign", options=[idx for _, idx in bag_options], format_func=lambda i: next(lbl for lbl, idx in bag_options if idx == i))
-target_driver_choice = col_re2.selectbox("Move To Driver", options=active_driver_ids + ["NOT GOING - VERY FAR (>180KM)"])
+target_driver_choice = col_re2.selectbox("Move To Driver", options=active_driver_ids + ["NOT GOING - VERY FAR (>180KM)", "NOT GOING - OUTSIDE UAE (OMAN)"])
 
 if col_re3.button("Move & Recalculate"):
     old_drv = master_rows[selected_bag_idx]["Driver_ID"]
@@ -524,7 +621,7 @@ if col_re3.button("Move & Recalculate"):
         st.success(f"Moved bag to {target_driver_choice}!")
         st.rerun()
 
-# Build Map with Snap-to-Roads
+# Build Map with Snap-to-Roads & UAE-Only Isolation
 m = folium.Map(location=[wh_lat, wh_lon], zoom_start=9, tiles=None, control_scale=True)
 Fullscreen(position="topleft").add_to(m)
 
@@ -538,46 +635,10 @@ for d_idx, d_name in enumerate(active_driver_ids):
 
     waypoints = [(wh_lat, wh_lon)] + [(float(s["Resolved_Lat"]), float(s["Resolved_Lon"])) for s in d_stops]
     
-    # Snap route lines to actual road curves using OSRM
+    # Snap route lines to actual road curves strictly inside UAE
     road_polyline = get_osrm_route_geometry(waypoints)
     AntPath(locations=road_polyline, color=color, weight=4, opacity=0.85).add_to(m)
 
     for s in d_stops:
         badge = folium.DivIcon(
-            html=f"""<div style="background:{color}; color:#fff; border-radius:50%; width:22px; height:22px; text-align:center; font-weight:bold; font-size:11px; line-height:22px; border:2px solid #fff;">{s['Stop_Sequence']}</div>""",
-            icon_size=(22, 22), icon_anchor=(11, 11)
-        )
-        folium.Marker(
-            location=[float(s["Resolved_Lat"]), float(s["Resolved_Lon"])],
-            popup=f"<b>{d_name} — Stop #{s['Stop_Sequence']}</b><br>Bag: {s.get(bag_col, '')}<br>City: {s.get('City_Area', '')}",
-            tooltip=f"{s.get(bag_col, '')} (Stop #{s['Stop_Sequence']})",
-            icon=badge
-        ).add_to(m)
-
-# Render Map
-st_folium(m, width="100%", height=520)
-
-# CSV Export
-out_fields = list(fieldnames) + ["Driver_ID", "Stop_Sequence", "City_Area", "Warehouse_Road_KM", "Leg_Distance_KM", "Route_Total_Bags", "Route_OneWay_KM", "Resolved_Lat", "Resolved_Lon", "Dispatch_Status"]
-csv_buffer = ""
-with open("temp_dispatch.csv", "w", newline="", encoding="utf-8-sig") as f:
-    w = csv.DictWriter(f, fieldnames=out_fields)
-    w.writeheader()
-    w.writerows(master_rows)
-with open("temp_dispatch.csv", "r", encoding="utf-8-sig") as f:
-    csv_buffer = f.read()
-
-st.download_button(
-    label="📥 Download Today's Dispatch Plan (CSV)",
-    data=csv_buffer,
-    file_name="driver_dispatch_plan.csv",
-    mime="text/csv"
-)
-
-# Driver WhatsApp Navigation Table
-st.subheader("Driver Route Navigation Links (WhatsApp Ready)")
-for d_name in active_driver_ids:
-    d_stops = [r for r in master_rows if r["Driver_ID"] == d_name]
-    d_stops.sort(key=lambda x: int(x["Stop_Sequence"]))
-    nav_link = build_google_maps_nav_link(wh_lat, wh_lon, d_stops)
-    st.markdown(f"**{d_name}** ({len(d_stops)} bags) — [Open Route in Google Maps ↗]({nav_link})")
+            html=f"""<div style="background:{color}; color:#fff; border-radius:50%; width:22px; height:22px; text-align:center; font-weight:bold; font-size:11px; line-
