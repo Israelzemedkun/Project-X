@@ -1,8 +1,11 @@
 import csv
 import io
 import math
+import os
 import re
+import sqlite3
 import urllib.parse
+from datetime import date, datetime, timedelta
 import folium
 from folium.plugins import AntPath, Fullscreen
 import requests
@@ -10,7 +13,7 @@ import streamlit as st
 from streamlit_folium import st_folium
 
 # ==========================================
-# PAGE CONFIGURATION
+# PAGE CONFIGURATION & FLEET ROSTER
 # ==========================================
 st.set_page_config(
     page_title="Lion Delivery Dispatch Portal",
@@ -19,11 +22,36 @@ st.set_page_config(
 )
 
 WAREHOUSE_URL = "https://maps.app.goo.gl/KxepQZ1YGK4qYeND7"
+DB_PATH = "dispatch_history.db"
+
+FLEET_DRIVERS = [
+    "Ahmed Nasir",
+    "Ahmed Kamal",
+    "Dawit",
+    "Hafiz Mohammed",
+    "Kaleab Argaw",
+    "Lema Sisay",
+    "Mustefa Kassa"
+]
+
 DISTANT_CITIES = {"Al Ain", "Abu Dhabi", "Fujairah / East Coast", "Ras Al Khaimah"}
 
-# UAE Safe Highway Waypoints (Used to keep routes inside UAE territory)
-UAE_MASAFI_WAYPOINT = (25.3180, 56.1660)   # Forces East Coast routes through E88/E84 inside UAE
-UAE_MADAM_WAYPOINT = (24.9600, 55.7600)    # Forces central routes through E102/E55 inside UAE
+# Safe UAE Highway Waypoints (Keeps routes strictly inside UAE borders)
+UAE_MASAFI_WAYPOINT = (25.3180, 56.1660)
+
+# UAE Traffic & Urban Parking Multipliers (6:30 AM Departure)
+CITY_TRAFFIC_FACTOR = {
+    "Dubai": 1.35,
+    "Sharjah": 1.40,
+    "Ajman": 1.15,
+    "Abu Dhabi": 1.20,
+    "Al Ain": 1.05,
+    "Ras Al Khaimah": 1.05,
+    "Umm Al Quwain": 1.05,
+    "Fujairah / East Coast": 1.10,
+    "Other UAE Corridor": 1.10
+}
+MINUTES_PER_BAG_HANDOVER = 8.0
 
 DRIVER_COLORS = [
     "#e6194B",  # Red
@@ -42,47 +70,205 @@ session.headers.update({
 
 
 # ==========================================
-# 1. BORDER CONTROL & UAE GEOFENCING
+# 1. SQLITE ROTATION MEMORY & ETA PREDICTOR
+# ==========================================
+def init_db():
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS dispatch_log ("
+            "dispatch_date TEXT, driver_name TEXT, primary_city TEXT, "
+            "is_distant INTEGER, total_bags INTEGER, one_way_km REAL, "
+            "est_finish_time TEXT, PRIMARY KEY (dispatch_date, driver_name))"
+        )
+
+
+def get_recent_driver_stats(days_back=7):
+    """Fetch last trip details and 7-day workload for each of the 7 drivers."""
+    init_db()
+    cutoff = (date.today() - timedelta(days=days_back)).isoformat()
+    yesterday_str = (date.today() - timedelta(days=1)).isoformat()
+
+    stats = {
+        d: {
+            "km_7d": 0.0,
+            "bags_7d": 0,
+            "distant_count_7d": 0,
+            "went_far_yesterday": False,
+            "last_city": "None"
+        }
+        for d in FLEET_DRIVERS
+    }
+
+    with sqlite3.connect(DB_PATH) as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT dispatch_date, driver_name, primary_city, is_distant, total_bags, one_way_km "
+            "FROM dispatch_log WHERE dispatch_date >= ? ORDER BY dispatch_date ASC",
+            (cutoff,)
+        )
+        for d_date, d_name, p_city, is_dist, bags, km in cur.fetchall():
+            if d_name not in stats:
+                continue
+            stats[d_name]["km_7d"] += float(km or 0.0)
+            stats[d_name]["bags_7d"] += int(bags or 0)
+            stats[d_name]["distant_count_7d"] += int(is_dist or 0)
+            stats[d_name]["last_city"] = p_city
+            if d_date == yesterday_str and int(is_dist or 0) == 1:
+                stats[d_name]["went_far_yesterday"] = True
+
+    return stats
+
+
+def log_dispatch_to_db(master_rows):
+    """Save today's confirmed driver assignments to SQLite history."""
+    init_db()
+    today_str = date.today().isoformat()
+    driver_summary = {}
+
+    for r in master_rows:
+        d_name = r.get("Assigned_Driver", "")
+        if not d_name or "NOT GOING" in d_name or d_name == "UNASSIGNED":
+            continue
+        if d_name not in driver_summary:
+            driver_summary[d_name] = {
+                "cities": set(),
+                "bags": int(r.get("Route_Total_Bags", 0) or 0),
+                "km": float(r.get("Route_OneWay_KM", 0.0) or 0.0),
+                "finish": r.get("Est_Finish_Time", "")
+            }
+        driver_summary[d_name]["cities"].add(r.get("City_Area", ""))
+
+    with sqlite3.connect(DB_PATH) as conn:
+        for d_name, info in driver_summary.items():
+            is_dist = 1 if (info["cities"] & DISTANT_CITIES) else 0
+            c_str = ", ".join(sorted(info["cities"]))
+            conn.execute(
+                "INSERT OR REPLACE INTO dispatch_log "
+                "(dispatch_date, driver_name, primary_city, is_distant, total_bags, one_way_km, est_finish_time) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (today_str, d_name, c_str, is_dist, info["bags"], info["km"], info["finish"])
+            )
+
+
+def predict_driver_finish_time(stops):
+    """
+    ML/Heuristic Shift Duration Model starting from 6:30 AM.
+    Combines highway vs. urban road speeds, UAE city congestion factors,
+    and 8 minutes per bag for parking and customer handover.
+    """
+    if not stops:
+        return "06:30 AM", 0.0
+
+    total_drive_mins = 0.0
+    for s in stops:
+        leg_km = float(s.get("Leg_Distance_KM", 0) or 0)
+        city = s.get("City_Area", "Other UAE Corridor")
+        traffic_mult = CITY_TRAFFIC_FACTOR.get(city, 1.15)
+        base_speed_kmh = 85.0 if leg_km >= 20.0 else 38.0
+        leg_mins = (leg_km / base_speed_kmh) * 60.0 * traffic_mult
+        total_drive_mins += leg_mins
+
+    total_bags = sum(int(float(s.get("Bags", 1) or 1)) for s in stops)
+    service_mins = total_bags * MINUTES_PER_BAG_HANDOVER
+
+    total_shift_mins = total_drive_mins + service_mins
+    start_time = datetime.strptime("06:30", "%H:%M")
+    finish_dt = start_time + timedelta(minutes=total_shift_mins)
+
+    return finish_dt.strftime("%I:%M %p"), round(total_shift_mins / 60.0, 1)
+
+
+def assign_drivers_with_rotation(routes, valid_stops, dist_matrix, far_yesterday_names, resting_today_names):
+    """
+    Match today's routes to your 7 named drivers:
+      - Excludes drivers marked as 'Resting Today'.
+      - Drivers who went to Al Ain / Abu Dhabi / Fujairah / RAK yesterday are rotated
+        to local routes (Dubai/Sharjah/Ajman) today and blocked from distant corridors.
+      - Freshest drivers (lowest 7-day km) get assigned to today's longest/distant routes.
+    """
+    stats = get_recent_driver_stats()
+    for d in far_yesterday_names:
+        if d in stats:
+            stats[d]["went_far_yesterday"] = True
+
+    available_pool = [d for d in FLEET_DRIVERS if d not in resting_today_names]
+    num_routes = len(routes)
+
+    # If pool is larger than number of routes, rest the drivers with highest recent workload
+    if len(available_pool) > num_routes:
+        available_pool.sort(
+            key=lambda d: (
+                stats[d]["went_far_yesterday"],
+                stats[d]["distant_count_7d"],
+                stats[d]["km_7d"]
+            )
+        )
+        active_drivers = available_pool[:num_routes]
+    else:
+        active_drivers = list(available_pool)
+        # If more routes than available pool, pull from resting list
+        for d in resting_today_names:
+            if len(active_drivers) < num_routes:
+                active_drivers.append(d)
+
+    # Classify each route as Distant or Local, sorted heaviest/farthest first
+    route_meta = []
+    for r_idx, r in enumerate(routes):
+        _, one_way_km = optimize_route_order(r, dist_matrix)
+        r_cities = {valid_stops[n - 1]["city"] for n in r}
+        is_distant = bool(r_cities & DISTANT_CITIES)
+        max_wh = max(valid_stops[n - 1]["wh_road_km"] for n in r)
+        route_meta.append({
+            "orig_idx": r_idx,
+            "route": r,
+            "is_distant": is_distant,
+            "one_way_km": one_way_km,
+            "max_wh": max_wh
+        })
+
+    route_meta.sort(key=lambda x: (x["is_distant"], x["max_wh"], x["one_way_km"]), reverse=True)
+
+    # Separate active drivers into Fresh (eligible for distant cities) vs Rotated (drove far yesterday)
+    fresh_drivers = [d for d in active_drivers if not stats[d]["went_far_yesterday"]]
+    rotated_drivers = [d for d in active_drivers if stats[d]["went_far_yesterday"]]
+
+    fresh_drivers.sort(key=lambda d: (stats[d]["distant_count_7d"], stats[d]["km_7d"]))
+    rotated_drivers.sort(key=lambda d: stats[d]["km_7d"])
+
+    ordered_driver_queue = fresh_drivers + rotated_drivers
+
+    assigned_pairs = []
+    for meta, d_name in zip(route_meta, ordered_driver_queue):
+        assigned_pairs.append((d_name, meta["route"]))
+
+    return assigned_pairs
+
+
+# ==========================================
+# 2. BORDER CONTROL & UAE GEOFENCING
 # ==========================================
 def is_in_oman(lat, lon):
-    """
-    Detect if a coordinate lies inside Oman territory or bordering enclaves:
-    1. Madha Enclave (Omani territory surrounded by Fujairah/Sharjah)
-    2. Musandam & Dibba Al-Baya (Oman territory north of RAK/Fujairah)
-    3. Al Buraimi & Mahdah (Oman territory directly east of Al Ain)
-    4. East of Hatta / Al Wajajah border checkpoint
-    """
-    # 1. Madha Enclave (Oman enclave surrounded by Fujairah/Sharjah)
+    """Detect if a coordinate lies inside Oman territory or bordering enclaves."""
     if 25.240 <= lat <= 25.345 and 56.270 <= lon <= 56.380:
         return True
-
-    # 2. Musandam Peninsula & Dibba Al-Baya (North of UAE)
     if lat >= 26.04:
         return True
     if lat >= 25.620 and lon >= 56.275:
         return True
-
-    # 3. Al Buraimi & Mahdah (Oman immediately east of Al Ain border)
     if 24.15 <= lat <= 24.45 and lon >= 55.775:
         return True
-
-    # 4. East of Hatta / Wajajah border checkpoint
     if 24.78 <= lat <= 24.88 and lon >= 56.140:
         return True
-
-    # 5. General South/East of UAE border fence
     if lat < 24.0 and lon >= 55.80:
         return True
-
     return False
 
 
 # ==========================================
-# 2. HELPER ROUTING & GEOMETRY FUNCTIONS
+# 3. HELPER ROUTING & GEOMETRY FUNCTIONS
 # ==========================================
 @st.cache_data(show_spinner=False)
 def resolve_google_maps_url(url):
-    """Extract coordinates from URL string or query Google Maps redirects."""
     if not url:
         return None, None
 
@@ -125,10 +311,7 @@ def resolve_google_maps_url(url):
 
 @st.cache_data(show_spinner=False)
 def get_osrm_route_geometry(coords_latlon):
-    """
-    Fetch road-following polyline from OSRM. If any part of the route attempts
-    to cut through Oman, re-route through internal UAE highways.
-    """
+    """Fetch road-following polyline from OSRM strictly inside UAE."""
     if len(coords_latlon) < 2:
         return coords_latlon
 
@@ -145,13 +328,11 @@ def get_osrm_route_geometry(coords_latlon):
         return pts
 
     raw_path = query_osrm(coords_latlon)
-
-    # Check if the generated polyline crosses into Oman
     crosses_oman = any(is_in_oman(lat, lon) for lat, lon in raw_path)
     if crosses_oman:
         safe_waypoints = [coords_latlon[0]]
         for pt in coords_latlon[1:]:
-            if pt[1] >= 56.0:  # Heading towards East Coast
+            if pt[1] >= 56.0:
                 safe_waypoints.append(UAE_MASAFI_WAYPOINT)
             safe_waypoints.append(pt)
         safe_path = query_osrm(safe_waypoints)
@@ -161,7 +342,6 @@ def get_osrm_route_geometry(coords_latlon):
 
 
 def identify_uae_city(lat, lon):
-    """Approximate UAE City/Region label based on coordinates."""
     if lat < 24.55 and lon >= 55.35:
         return "Al Ain"
     if lon < 54.95 or (lat < 24.70 and lon < 55.35):
@@ -182,7 +362,6 @@ def identify_uae_city(lat, lon):
 
 
 def haversine_km(lat1, lon1, lat2, lon2):
-    """Fallback road approximation (straight-line * 1.25 road factor)."""
     r = 6371.0
     phi1, phi2 = math.radians(lat1), math.radians(lat2)
     dphi = math.radians(lat2 - lat1)
@@ -193,7 +372,6 @@ def haversine_km(lat1, lon1, lat2, lon2):
 
 @st.cache_data(show_spinner=False)
 def build_road_distance_matrix(coords):
-    """Build N x N road distance matrix using OSRM in batches."""
     n = len(coords)
     matrix = [[0.0] * n for _ in range(n)]
 
@@ -235,7 +413,6 @@ def build_road_distance_matrix(coords):
 
 
 def optimize_route_order(route, dist_matrix):
-    """Order stops ONE-WAY starting from Ajman Warehouse (node 0) to final destination."""
     if not route:
         return [], 0.0
 
@@ -273,7 +450,6 @@ def optimize_route_order(route, dist_matrix):
 
 
 def are_cities_compatible(cities_a, cities_b):
-    """Enforce directional corridor isolation."""
     comb = cities_a | cities_b
     if len(comb & DISTANT_CITIES) > 1:
         return False
@@ -289,7 +465,6 @@ def are_cities_compatible(cities_a, cities_b):
 
 
 def get_primary_route_label(route, valid_stops):
-    """Generate display route label for Driver_ID."""
     city_bags = {}
     for node in route:
         c = valid_stops[node - 1]["city"]
@@ -305,7 +480,6 @@ def get_primary_route_label(route, valid_stops):
 
 
 def build_balanced_morning_routes(dist_matrix, valid_stops, target_drivers, max_capacity, min_capacity, max_route_km):
-    """4-stage route consolidation and highway relief."""
     num_stops = len(valid_stops)
     demand_list = [s["bags"] for s in valid_stops]
     city_list = [s["city"] for s in valid_stops]
@@ -343,7 +517,7 @@ def build_balanced_morning_routes(dist_matrix, valid_stops, target_drivers, max_
                 return True
         return False
 
-    # 1. Lock same-city clusters first
+    # 1. Lock same-city clusters
     same_city_pairs = []
     for i in range(1, num_stops + 1):
         for j in range(i + 1, num_stops + 1):
@@ -442,7 +616,6 @@ def build_balanced_morning_routes(dist_matrix, valid_stops, target_drivers, max_
 
 
 def resequence_driver_stops(driver_rows, wh_lat, wh_lon):
-    """Re-sequence stops when a bag is manually reassigned to another driver."""
     if not driver_rows:
         return []
 
@@ -466,11 +639,15 @@ def resequence_driver_stops(driver_rows, wh_lat, wh_lon):
         row["Route_OneWay_KM"] = round(one_way_km, 2)
         reordered_rows.append(row)
 
+    est_finish, est_hrs = predict_driver_finish_time(reordered_rows)
+    for row in reordered_rows:
+        row["Est_Finish_Time"] = est_finish
+        row["Est_Shift_Hours"] = est_hrs
+
     return reordered_rows
 
 
 def build_google_maps_nav_link(wh_lat, wh_lon, stops):
-    """Build multi-stop Google Maps navigation URL with UAE waypoint protection."""
     pts = [f"{wh_lat:.6f},{wh_lon:.6f}"]
     for s in stops[:9]:
         lat, lon = float(s['Resolved_Lat']), float(s['Resolved_Lon'])
@@ -481,21 +658,40 @@ def build_google_maps_nav_link(wh_lat, wh_lon, stops):
 
 
 # ==========================================
-# 3. SIDEBAR CONTROLS
+# 4. SIDEBAR: SETTINGS & DRIVER ROTATION
 # ==========================================
-st.sidebar.title("🚚 Dispatch Settings")
+db_stats = get_recent_driver_stats()
+default_far_yesterday = [d for d, st_info in db_stats.items() if st_info["went_far_yesterday"]]
+
+st.sidebar.title("🚚 Dispatch & Rotation")
+uploaded_file = st.sidebar.file_uploader("1. Upload 'lion_delivery_all_bags.csv'", type=["csv"])
+
+st.sidebar.markdown("### 👥 Driver Rotation Rules")
+far_yesterday_input = st.sidebar.multiselect(
+    "Went Far Yesterday (Al Ain / Abu Dhabi / Fujairah / RAK):",
+    options=FLEET_DRIVERS,
+    default=default_far_yesterday,
+    help="These drivers will be rotated to shorter local routes (Dubai/Sharjah/Ajman) or rested today."
+)
+
+resting_today_input = st.sidebar.multiselect(
+    "Resting / Off Today:",
+    options=FLEET_DRIVERS,
+    default=[],
+    help="Select up to 2 drivers who are off today. If left blank, the system rests the most fatigued drivers."
+)
+
+st.sidebar.markdown("### ⚙️ Route Constraints")
 target_drivers_input = st.sidebar.slider("Target Morning Drivers", min_value=3, max_value=7, value=5)
 max_bags_input = st.sidebar.slider("Max Bags per Driver", min_value=15, max_value=25, value=21)
 min_bags_input = st.sidebar.slider("Min Bags per Driver (No tiny runs)", min_value=3, max_value=10, value=6)
 max_dist_input = st.sidebar.number_input("Max Warehouse Road Distance (KM)", value=180.0, step=10.0)
 
-uploaded_file = st.sidebar.file_uploader("Upload 'lion_delivery_all_bags.csv'", type=["csv"])
-
 
 # ==========================================
-# 4. MAIN APPLICATION PIPELINE
+# 5. MAIN APPLICATION PIPELINE
 # ==========================================
-st.title("Ajman Warehouse Delivery Dispatcher")
+st.title("Ajman Warehouse 6:30 AM Dispatch Portal")
 
 wh_lat, wh_lon = resolve_google_maps_url(WAREHOUSE_URL)
 if not wh_lat:
@@ -503,7 +699,19 @@ if not wh_lat:
     st.stop()
 
 if uploaded_file is None:
-    st.info("👋 Upload today's scraped `lion_delivery_all_bags.csv` in the sidebar to generate routes.")
+    st.info("👋 Upload today's scraped `lion_delivery_all_bags.csv` in the sidebar to assign your 7 drivers.")
+    with st.expander("📊 View 7-Day Driver Rotation History"):
+        hist_rows = [
+            {
+                "Driver": d,
+                "7-Day KM": round(info["km_7d"], 1),
+                "7-Day Bags": info["bags_7d"],
+                "Distant Trips (7d)": info["distant_count_7d"],
+                "Last Area": info["last_city"]
+            }
+            for d, info in db_stats.items()
+        ]
+        st.table(hist_rows)
     st.stop()
 
 content = uploaded_file.getvalue().decode("utf-8-sig").splitlines()
@@ -512,9 +720,8 @@ raw_rows = list(reader)
 fieldnames = reader.fieldnames or []
 bag_col = fieldnames[0] if fieldnames else "Bag_Number"
 
-# Trigger optimization only on new file or manual button click
-if "dispatch_data" not in st.session_state or st.sidebar.button("🔄 Re-Run Full Route Optimization"):
-    with st.spinner("Resolving coordinates, applying Oman border filter, and generating routes..."):
+if "dispatch_data" not in st.session_state or st.sidebar.button("🔄 Re-Run Optimization & Driver Rotation"):
+    with st.spinner("Resolving coordinates, filtering Oman borders, and rotating drivers..."):
         resolved, unresolvable, oman_stops = [], [], []
         url_col = next((c for c in fieldnames if any(k in c.lower() for k in ["url", "link", "map", "location"])), None)
 
@@ -561,14 +768,22 @@ if "dispatch_data" not in st.session_state or st.sidebar.button("🔄 Re-Run Ful
             min_capacity=min_bags_input,
             max_route_km=480.0
         )
-        routes.sort(key=lambda r: (max(valid_stops[n - 1]["wh_road_km"] for n in r), sum(valid_stops[n - 1]["bags"] for n in r)), reverse=True)
+
+        # Match routes to your 7 named drivers using rotation rules
+        driver_route_pairs = assign_drivers_with_rotation(
+            routes, valid_stops, dist_mat,
+            far_yesterday_names=far_yesterday_input,
+            resting_today_names=resting_today_input
+        )
 
         final_rows = []
-        for r_idx, route in enumerate(routes, start=1):
+        for d_name, route in driver_route_pairs:
             ordered, total_km = optimize_route_order(route, dist_mat)
             total_bags = sum(valid_stops[n - 1]["bags"] for n in ordered)
-            driver_name = f"Driver {r_idx} ({get_primary_route_label(ordered, valid_stops)})"
+            corridor_label = get_primary_route_label(ordered, valid_stops)
+            driver_display = f"{d_name} ({corridor_label})"
 
+            route_temp_rows = []
             prev = 0
             for seq, node in enumerate(ordered, start=1):
                 stop = valid_stops[node - 1]
@@ -576,7 +791,8 @@ if "dispatch_data" not in st.session_state or st.sidebar.button("🔄 Re-Run Ful
                 prev = node
                 item = dict(stop["row_data"])
                 item.update({
-                    "Driver_ID": driver_name,
+                    "Assigned_Driver": d_name,
+                    "Driver_ID": driver_display,
                     "Stop_Sequence": seq,
                     "City_Area": stop["city"],
                     "Warehouse_Road_KM": round(stop["wh_road_km"], 2),
@@ -587,11 +803,18 @@ if "dispatch_data" not in st.session_state or st.sidebar.button("🔄 Re-Run Ful
                     "Resolved_Lon": round(stop["lon"], 6),
                     "Dispatch_Status": "ASSIGNED_630AM"
                 })
+                route_temp_rows.append(item)
+
+            est_finish, est_hrs = predict_driver_finish_time(route_temp_rows)
+            for item in route_temp_rows:
+                item["Est_Finish_Time"] = est_finish
+                item["Est_Shift_Hours"] = est_hrs
                 final_rows.append(item)
 
         for fs in far_stops:
             item = dict(fs["row_data"])
             item.update({
+                "Assigned_Driver": "NOT GOING",
                 "Driver_ID": "NOT GOING - VERY FAR (>180KM)",
                 "Stop_Sequence": "",
                 "City_Area": fs["city"],
@@ -599,6 +822,8 @@ if "dispatch_data" not in st.session_state or st.sidebar.button("🔄 Re-Run Ful
                 "Leg_Distance_KM": "",
                 "Route_Total_Bags": "",
                 "Route_OneWay_KM": "",
+                "Est_Finish_Time": "",
+                "Est_Shift_Hours": "",
                 "Resolved_Lat": round(fs["lat"], 6),
                 "Resolved_Lon": round(fs["lon"], 6),
                 "Dispatch_Status": "UNABLE_TO_DELIVER_OVER_180KM"
@@ -608,6 +833,7 @@ if "dispatch_data" not in st.session_state or st.sidebar.button("🔄 Re-Run Ful
         for os_stop in oman_stops:
             item = dict(os_stop["row_data"])
             item.update({
+                "Assigned_Driver": "NOT GOING",
                 "Driver_ID": "NOT GOING - OUTSIDE UAE (OMAN)",
                 "Stop_Sequence": "",
                 "City_Area": "Oman Territory",
@@ -615,6 +841,8 @@ if "dispatch_data" not in st.session_state or st.sidebar.button("🔄 Re-Run Ful
                 "Leg_Distance_KM": "",
                 "Route_Total_Bags": "",
                 "Route_OneWay_KM": "",
+                "Est_Finish_Time": "",
+                "Est_Shift_Hours": "",
                 "Resolved_Lat": round(os_stop["lat"], 6),
                 "Resolved_Lon": round(os_stop["lon"], 6),
                 "Dispatch_Status": "EXCLUDED_OUTSIDE_UAE"
@@ -625,61 +853,105 @@ if "dispatch_data" not in st.session_state or st.sidebar.button("🔄 Re-Run Ful
 
 master_rows = st.session_state["dispatch_data"]
 
-# Display KPI Overview
-active_driver_ids = sorted(list(set(r["Driver_ID"] for r in master_rows if "NOT GOING" not in r["Driver_ID"] and r["Driver_ID"] != "UNASSIGNED")))
+# Identify Active vs Resting Drivers Today
+active_driver_ids = []
+active_named_drivers = []
+for r in master_rows:
+    d_id = r.get("Driver_ID", "")
+    d_name = r.get("Assigned_Driver", "")
+    if d_id and "NOT GOING" not in d_id and d_id != "UNASSIGNED":
+        if d_id not in active_driver_ids:
+            active_driver_ids.append(d_id)
+        if d_name and d_name not in active_named_drivers:
+            active_named_drivers.append(d_name)
+
+resting_drivers_today = [d for d in FLEET_DRIVERS if d not in active_named_drivers]
 total_bags_assigned = sum(int(float(r.get("Bags", 1) or 1)) for r in master_rows if "NOT GOING" not in r["Driver_ID"])
 excluded_bags = [r for r in master_rows if "NOT GOING" in r["Driver_ID"]]
-oman_excluded = [r for r in master_rows if "OMAN" in r["Driver_ID"]]
 
 kpi1, kpi2, kpi3, kpi4 = st.columns(4)
-kpi1.metric("Active Drivers Today", f"{len(active_driver_ids)} / 7")
+kpi1.metric("Active Drivers (6:30 AM)", f"{len(active_driver_ids)} / 7")
 kpi2.metric("Total Bags Assigned", total_bags_assigned)
-kpi3.metric("Resting Drivers", 7 - len(active_driver_ids))
-kpi4.metric("Excluded Stops", f"{len(excluded_bags)} ({len(oman_excluded)} Oman)")
+kpi3.metric("Resting Drivers Today", ", ".join(resting_drivers_today) if resting_drivers_today else "None")
+kpi4.metric("Excluded Stops (>180km / Oman)", len(excluded_bags))
 
-# Stop Reassignment UI
-st.subheader("Manual Stop Adjustment")
-col_re1, col_re2, col_re3 = st.columns([3, 2, 1.5])
+# ==========================================
+# 6. MANUAL STOP & DRIVER SWAP CONTROLS
+# ==========================================
+ctrl_tab1, ctrl_tab2 = st.tabs(["🔄 Move Single Bag", "🔀 Swap Drivers Between Routes"])
 
-bag_options = [
-    (f"{r.get(bag_col, '')} | {r.get('Driver_ID', '')} (Stop #{r.get('Stop_Sequence', '-')})", idx)
-    for idx, r in enumerate(master_rows) if r.get("Resolved_Lat")
-]
-
-selected_bag_idx = col_re1.selectbox("Select Bag to Reassign", options=[idx for _, idx in bag_options], format_func=lambda i: next(lbl for lbl, idx in bag_options if idx == i))
-target_driver_choice = col_re2.selectbox("Move To Driver", options=active_driver_ids + ["NOT GOING - VERY FAR (>180KM)", "NOT GOING - OUTSIDE UAE (OMAN)"])
-
-if col_re3.button("Move & Recalculate"):
-    old_drv = master_rows[selected_bag_idx]["Driver_ID"]
-    if old_drv != target_driver_choice:
-        master_rows[selected_bag_idx]["Driver_ID"] = target_driver_choice
-
-        # Re-sequence both affected drivers
-        for affected_drv in [old_drv, target_driver_choice]:
-            if "NOT GOING" not in affected_drv:
-                d_indices = [i for i, r in enumerate(master_rows) if r.get("Driver_ID") == affected_drv]
-                d_rows = [master_rows[i] for i in d_indices]
-                updated_rows = resequence_driver_stops(d_rows, wh_lat, wh_lon)
-                for i, updated_row in zip(d_indices, updated_rows):
-                    master_rows[i] = updated_row
+with ctrl_tab1:
+    col_re1, col_re2, col_re3 = st.columns([3, 2, 1.5])
+    bag_options = [
+        (f"{r.get(bag_col, '')} | {r.get('Driver_ID', '')} (Stop #{r.get('Stop_Sequence', '-')})", idx)
+        for idx, r in enumerate(master_rows) if r.get("Resolved_Lat")
+    ]
+    selected_bag_idx = col_re1.selectbox(
+        "Select Bag to Reassign",
+        options=[idx for _, idx in bag_options],
+        format_func=lambda i: next(lbl for lbl, idx in bag_options if idx == i)
+    )
+    target_driver_choice = col_re2.selectbox(
+        "Move To Driver",
+        options=active_driver_ids + ["NOT GOING - VERY FAR (>180KM)", "NOT GOING - OUTSIDE UAE (OMAN)"]
+    )
+    if col_re3.button("Move Bag & Re-Sequence"):
+        old_drv = master_rows[selected_bag_idx]["Driver_ID"]
+        if old_drv != target_driver_choice:
+            master_rows[selected_bag_idx]["Driver_ID"] = target_driver_choice
+            if "NOT GOING" not in target_driver_choice:
+                master_rows[selected_bag_idx]["Assigned_Driver"] = target_driver_choice.split(" (")[0]
             else:
-                for r in master_rows:
-                    if r.get("Driver_ID") == affected_drv:
-                        r["Stop_Sequence"] = ""
-                        r["Leg_Distance_KM"] = ""
-                        r["Route_Total_Bags"] = ""
-                        r["Route_OneWay_KM"] = ""
+                master_rows[selected_bag_idx]["Assigned_Driver"] = "NOT GOING"
 
-        st.session_state["dispatch_data"] = master_rows
-        st.success(f"Moved bag to {target_driver_choice} and updated stop sequence!")
-        st.rerun()
+            for affected_drv in [old_drv, target_driver_choice]:
+                if "NOT GOING" not in affected_drv:
+                    d_indices = [i for i, r in enumerate(master_rows) if r.get("Driver_ID") == affected_drv]
+                    d_rows = [master_rows[i] for i in d_indices]
+                    updated_rows = resequence_driver_stops(d_rows, wh_lat, wh_lon)
+                    for i, updated_row in zip(d_indices, updated_rows):
+                        master_rows[i] = updated_row
+                else:
+                    for r in master_rows:
+                        if r.get("Driver_ID") == affected_drv:
+                            r["Stop_Sequence"] = ""
+                            r["Leg_Distance_KM"] = ""
+                            r["Route_Total_Bags"] = ""
+                            r["Route_OneWay_KM"] = ""
+                            r["Est_Finish_Time"] = ""
+                            r["Est_Shift_Hours"] = ""
 
-# Build Map with Snap-to-Roads & UAE-Only Isolation
+            st.session_state["dispatch_data"] = master_rows
+            st.rerun()
+
+with ctrl_tab2:
+    sc1, sc2, sc3 = st.columns([2, 2, 1.5])
+    swap_driver_a = sc1.selectbox("Driver 1", options=FLEET_DRIVERS, index=0)
+    swap_driver_b = sc2.selectbox("Driver 2", options=FLEET_DRIVERS, index=1)
+    if sc3.button("🔀 Swap Entire Route"):
+        if swap_driver_a != swap_driver_b:
+            for r in master_rows:
+                curr_d = r.get("Assigned_Driver", "")
+                curr_id = r.get("Driver_ID", "")
+                if curr_d == swap_driver_a and " (" in curr_id:
+                    corridor_part = curr_id.split(" (", 1)[1]
+                    r["Assigned_Driver"] = swap_driver_b
+                    r["Driver_ID"] = f"{swap_driver_b} ({corridor_part}"
+                elif curr_d == swap_driver_b and " (" in curr_id:
+                    corridor_part = curr_id.split(" (", 1)[1]
+                    r["Assigned_Driver"] = swap_driver_a
+                    r["Driver_ID"] = f"{swap_driver_a} ({corridor_part}"
+            st.session_state["dispatch_data"] = master_rows
+            st.rerun()
+
+# ==========================================
+# 7. INTERACTIVE MAP (SNAP-TO-ROADS)
+# ==========================================
 m = folium.Map(location=[wh_lat, wh_lon], zoom_start=9, tiles=None, control_scale=True)
 Fullscreen(position="topleft").add_to(m)
 
 folium.TileLayer("https://mt1.google.com/vt/lyrs=m&x={x}&y={y}&z={z}", attr="Google Maps", name="Google Maps", control=True).add_to(m)
-folium.Marker(location=[wh_lat, wh_lon], popup="Ajman Warehouse", icon=folium.Icon(color="black", icon="home", prefix="fa")).add_to(m)
+folium.Marker(location=[wh_lat, wh_lon], popup="Ajman Warehouse (6:30 AM)", icon=folium.Icon(color="black", icon="home", prefix="fa")).add_to(m)
 
 for d_idx, d_name in enumerate(active_driver_ids):
     color = DRIVER_COLORS[d_idx % len(DRIVER_COLORS)]
@@ -687,10 +959,8 @@ for d_idx, d_name in enumerate(active_driver_ids):
     d_stops.sort(key=lambda x: int(x["Stop_Sequence"]))
 
     waypoints = [(wh_lat, wh_lon)] + [(float(s["Resolved_Lat"]), float(s["Resolved_Lon"])) for s in d_stops]
-    
-    # Snap route lines to actual road curves strictly inside UAE
     road_polyline = get_osrm_route_geometry(waypoints)
-    AntPath(locations=road_polyline, color=color, weight=4, opacity=0.85).add_to(m)
+    AntPath(locations=road_polyline, color=color, weight=4, opacity=0.85, tooltip=d_name).add_to(m)
 
     for s in d_stops:
         badge_html = (
@@ -699,19 +969,20 @@ for d_idx, d_name in enumerate(active_driver_ids):
             f'font-size:11px; line-height:22px; border:2px solid #fff;">'
             f'{s["Stop_Sequence"]}</div>'
         )
-        badge = folium.DivIcon(
-            html=badge_html,
-            icon_size=(22, 22),
-            icon_anchor=(11, 11)
+        badge = folium.DivIcon(html=badge_html, icon_size=(22, 22), icon_anchor=(11, 11))
+        popup_text = (
+            f"<b>{d_name} — Stop #{s['Stop_Sequence']}</b><br>"
+            f"Bag: {s.get(bag_col, '')}<br>"
+            f"City: {s.get('City_Area', '')}<br>"
+            f"Est. Route Finish: {s.get('Est_Finish_Time', '')}"
         )
         folium.Marker(
             location=[float(s["Resolved_Lat"]), float(s["Resolved_Lon"])],
-            popup=f"<b>{d_name} — Stop #{s['Stop_Sequence']}</b><br>Bag: {s.get(bag_col, '')}<br>City: {s.get('City_Area', '')}",
-            tooltip=f"{s.get(bag_col, '')} (Stop #{s['Stop_Sequence']})",
+            popup=popup_text,
+            tooltip=f"{s.get(bag_col, '')} • Stop #{s['Stop_Sequence']} • {d_name}",
             icon=badge
         ).add_to(m)
 
-# Plot Excluded / Oman stops
 for ex_stop in excluded_bags:
     lat, lon = float(ex_stop["Resolved_Lat"]), float(ex_stop["Resolved_Lon"])
     is_om = "OMAN" in ex_stop["Driver_ID"]
@@ -723,11 +994,7 @@ for ex_stop in excluded_bags:
         f'width:22px; height:22px; text-align:center; font-weight:bold; '
         f'font-size:11px; line-height:22px; border:2px solid #fff;">✕</div>'
     )
-    warn_badge = folium.DivIcon(
-        html=warn_html,
-        icon_size=(22, 22),
-        icon_anchor=(11, 11)
-    )
+    warn_badge = folium.DivIcon(html=warn_html, icon_size=(22, 22), icon_anchor=(11, 11))
     folium.Marker(
         location=[lat, lon],
         popup=f"<b>🚫 {label}</b><br>Bag: {ex_stop.get(bag_col, '')}",
@@ -735,13 +1002,15 @@ for ex_stop in excluded_bags:
         icon=warn_badge
     ).add_to(m)
 
-# Render Map inside Streamlit
-st_folium(m, width="100%", height=520)
+st_folium(m, width="100%", height=500)
 
-# CSV Export (In-memory buffer)
+# ==========================================
+# 8. EXPORT, ROTATION LOG & WHATSAPP CARDS
+# ==========================================
 out_fields = list(fieldnames) + [
-    "Driver_ID", "Stop_Sequence", "City_Area", "Warehouse_Road_KM",
-    "Leg_Distance_KM", "Route_Total_Bags", "Route_OneWay_KM",
+    "Assigned_Driver", "Driver_ID", "Stop_Sequence", "City_Area",
+    "Warehouse_Road_KM", "Leg_Distance_KM", "Route_Total_Bags",
+    "Route_OneWay_KM", "Est_Finish_Time", "Est_Shift_Hours",
     "Resolved_Lat", "Resolved_Lon", "Dispatch_Status"
 ]
 
@@ -750,17 +1019,30 @@ writer = csv.DictWriter(csv_buffer, fieldnames=out_fields)
 writer.writeheader()
 writer.writerows(master_rows)
 
-st.download_button(
+btn_col1, btn_col2 = st.columns(2)
+btn_col1.download_button(
     label="📥 Download Today's Dispatch Plan (CSV)",
     data=csv_buffer.getvalue().encode("utf-8-sig"),
-    file_name="driver_dispatch_plan.csv",
+    file_name=f"dispatch_plan_{date.today().isoformat()}.csv",
     mime="text/csv"
 )
 
-# Driver WhatsApp Navigation Table
-st.subheader("Driver Route Navigation Links (WhatsApp Ready)")
+if btn_col2.button("💾 Confirm & Log Today's Routes to Rotation History"):
+    log_dispatch_to_db(master_rows)
+    st.success("✅ Saved today's driver assignments to rotation history! Tomorrow's run will automatically rotate distant drivers.")
+
+st.subheader("📲 6:30 AM Driver Dispatch Cards (WhatsApp Ready)")
 for d_name in active_driver_ids:
     d_stops = [r for r in master_rows if r["Driver_ID"] == d_name]
     d_stops.sort(key=lambda x: int(x["Stop_Sequence"]))
     nav_link = build_google_maps_nav_link(wh_lat, wh_lon, d_stops)
-    st.markdown(f"**{d_name}** ({len(d_stops)} bags) — [Open Route in Google Maps ↗]({nav_link})")
+    one_way_km = d_stops[0].get("Route_OneWay_KM", "0")
+    est_fin = d_stops[0].get("Est_Finish_Time", "")
+    est_hrs = d_stops[0].get("Est_Shift_Hours", "")
+    bag_list_str = ", ".join(f"#{s['Stop_Sequence']}: {s.get(bag_col, '')}" for s in d_stops)
+
+    st.markdown(
+        f"**{d_name}** — **{len(d_stops)} bags** | **{one_way_km} km** | "
+        f"⏱️ Est. Finish: **{est_fin}** ({est_hrs} hrs) — [🗺️ Open Route in Google Maps ↗]({nav_link})\n"
+        f"> *Stop Order:* `{bag_list_str}`"
+    )
