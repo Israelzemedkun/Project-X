@@ -849,7 +849,7 @@ with ctrl_tab1:
 
             for affected_drv in [old_drv, target_driver_choice]:
                 if "NOT GOING" not in affected_drv:
-                    d_indices = [i for i, r in enumerate(master_rows) if r.get("Driver_ID"] == affected_drv)
+                    d_indices = [i for i, r in enumerate(master_rows) if r.get("Driver_ID") == affected_drv]
                     d_rows = [master_rows[i] for i in d_indices]
                     updated_rows = resequence_driver_stops(d_rows, wh_lat, wh_lon)
                     for i, updated_row in zip(d_indices, updated_rows):
