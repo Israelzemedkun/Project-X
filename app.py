@@ -1,27 +1,22 @@
 import csv
 import io
 import math
+import os
 import re
 import sqlite3
 import urllib.parse
 from datetime import date, datetime, timedelta
 import folium
 from folium.plugins import AntPath, Fullscreen
-import numpy as np
 import requests
 import streamlit as st
 from streamlit_folium import st_folium
-
-# Open-Source AI & Operations Research Imports
-from ortools.constraint_solver import pywrapcp, routing_enums_pb2
-from sklearn.cluster import AgglomerativeClustering
-from sklearn.ensemble import RandomForestRegressor
 
 # ==========================================
 # PAGE CONFIGURATION & FLEET ROSTER
 # ==========================================
 st.set_page_config(
-    page_title="Lion Delivery AI Dispatch Portal",
+    page_title="Lion Delivery Dispatch Portal",
     page_icon="🚚",
     layout="wide"
 )
@@ -40,23 +35,7 @@ FLEET_DRIVERS = [
 ]
 
 DISTANT_CITIES = {"Al Ain", "Abu Dhabi", "Fujairah / East Coast", "Ras Al Khaimah"}
-
-# Safe UAE Highway Waypoints (Keeps routes strictly inside UAE borders)
 UAE_MASAFI_WAYPOINT = (25.3180, 56.1660)
-
-# UAE Traffic & Urban Parking Multipliers (6:30 AM Departure)
-CITY_TRAFFIC_FACTOR = {
-    "Dubai": 1.35,
-    "Sharjah": 1.40,
-    "Ajman": 1.15,
-    "Abu Dhabi": 1.20,
-    "Al Ain": 1.05,
-    "Ras Al Khaimah": 1.05,
-    "Umm Al Quwain": 1.05,
-    "Fujairah / East Coast": 1.10,
-    "Other UAE Corridor": 1.10
-}
-MINUTES_PER_BAG_HANDOVER = 8.0
 
 DRIVER_COLORS = [
     "#e6194B",  # Red
@@ -70,7 +49,7 @@ DRIVER_COLORS = [
 
 session = requests.Session()
 session.headers.update({
-    "User-Agent": "LionDeliveryDispatchApp/2.0 (ai-dispatch-portal; contact@liondelivery.local)"
+    "User-Agent": "LionDeliveryDispatchApp/1.0 (dispatch-portal; contact@liondelivery.local)"
 })
 
 
@@ -153,65 +132,18 @@ def log_dispatch_to_db(master_rows):
             )
 
 
-# ==========================================
-# 2. SCIKIT-LEARN RANDOM FOREST ETA MODEL
-# ==========================================
-@st.cache_resource(show_spinner=False)
-def get_trained_eta_model():
-    """
-    Train a Scikit-Learn RandomForestRegressor on UAE delivery leg profiles:
-    Features: [leg_km, traffic_multiplier, is_highway_leg, bags_at_stop, stop_seq]
-    Target: leg_total_minutes (driving + parking + customer handover)
-    """
-    rng = np.random.RandomState(42)
-    n_samples = 600
-
-    leg_km = rng.uniform(0.5, 140.0, n_samples)
-    traffic_mult = rng.choice([1.05, 1.10, 1.15, 1.20, 1.35, 1.40], n_samples)
-    is_highway = (leg_km >= 20.0).astype(float)
-    bags_count = rng.choice([1, 1, 1, 2, 3], n_samples)
-    stop_seq = rng.randint(1, 22, n_samples)
-
-    # Realistic UAE speed curve + urban parking & handover overhead
-    speed_kmh = np.where(is_highway == 1.0, 88.0, 36.0)
-    drive_mins = (leg_km / speed_kmh) * 60.0 * traffic_mult
-    parking_overhead = np.where(traffic_mult >= 1.30, 3.5, 1.5)
-    handover_mins = bags_count * MINUTES_PER_BAG_HANDOVER + parking_overhead
-
-    y_mins = drive_mins + handover_mins
-    X_train = np.column_stack([leg_km, traffic_mult, is_highway, bags_count, stop_seq])
-
-    rf_model = RandomForestRegressor(n_estimators=80, max_depth=10, random_state=42)
-    rf_model.fit(X_train, y_mins)
-    return rf_model
-
-
-def predict_driver_finish_time(stops):
-    """Predict shift completion time from 6:30 AM using Scikit-Learn Random Forest."""
+def predict_driver_finish_time(stops, total_one_way_km):
     if not stops:
-        return "06:30 AM", 0.0
-
-    rf_model = get_trained_eta_model()
-    features = []
-    for idx, s in enumerate(stops, start=1):
-        leg_km = float(s.get("Leg_Distance_KM", 0.0) or 0.0)
-        city = s.get("City_Area", "Other UAE Corridor")
-        t_mult = CITY_TRAFFIC_FACTOR.get(city, 1.15)
-        is_hwy = 1.0 if leg_km >= 20.0 else 0.0
-        bags = int(float(s.get("Bags", 1) or 1))
-        features.append([leg_km, t_mult, is_hwy, bags, idx])
-
-    X_pred = np.array(features)
-    predicted_leg_mins = rf_model.predict(X_pred)
-    total_shift_mins = float(np.sum(predicted_leg_mins))
-
+        return "01:30 PM", 6.0
+    total_bags = sum(int(float(s.get("Bags", 1) or 1)) for s in stops)
+    est_hours = round(2.0 + (total_one_way_km / 45.0) + (total_bags * 0.15), 1)
     start_time = datetime.strptime("06:30", "%H:%M")
-    finish_dt = start_time + timedelta(minutes=total_shift_mins)
-    return finish_dt.strftime("%I:%M %p"), round(total_shift_mins / 60.0, 1)
+    finish_dt = start_time + timedelta(hours=est_hours)
+    return finish_dt.strftime("%I:%M %p"), est_hours
 
 
 # ==========================================
-# 3. BORDER CONTROL & UAE GEOFENCING
+# 2. BORDER CONTROL & UAE GEOFENCING
 # ==========================================
 def is_in_oman(lat, lon):
     if 25.240 <= lat <= 25.345 and 56.270 <= lon <= 56.380:
@@ -230,7 +162,7 @@ def is_in_oman(lat, lon):
 
 
 # ==========================================
-# 4. URL RESOLUTION & OSRM ROAD MATRICES
+# 3. HELPER ROUTING & GEOMETRY FUNCTIONS
 # ==========================================
 @st.cache_data(show_spinner=False)
 def resolve_google_maps_url(url):
@@ -376,9 +308,43 @@ def build_road_distance_matrix(coords):
     return matrix
 
 
-# ==========================================
-# 5. GOOGLE OR-TOOLS & SCIKIT-LEARN SOLVERS
-# ==========================================
+def optimize_route_order(route, dist_matrix):
+    if not route:
+        return [], 0.0
+
+    unvisited = set(route)
+    ordered = []
+    curr = 0
+    while unvisited:
+        nxt = min(unvisited, key=lambda node: dist_matrix[curr][node])
+        ordered.append(nxt)
+        unvisited.remove(nxt)
+        curr = nxt
+
+    def route_distance(seq):
+        if not seq:
+            return 0.0
+        dist = dist_matrix[0][seq[0]]
+        for k in range(len(seq) - 1):
+            dist += dist_matrix[seq[k]][seq[k + 1]]
+        return dist
+
+    improved = True
+    while improved and len(ordered) > 1:
+        improved = False
+        best_dist = route_distance(ordered)
+        for i in range(len(ordered) - 1):
+            for j in range(i + 1, len(ordered)):
+                candidate = ordered[:i] + ordered[i:j + 1][::-1] + ordered[j + 1:]
+                cand_dist = route_distance(candidate)
+                if cand_dist + 1e-6 < best_dist:
+                    ordered = candidate
+                    best_dist = cand_dist
+                    improved = True
+
+    return ordered, route_distance(ordered)
+
+
 def are_cities_compatible(cities_a, cities_b):
     comb = cities_a | cities_b
     if len(comb & DISTANT_CITIES) > 1:
@@ -394,113 +360,27 @@ def are_cities_compatible(cities_a, cities_b):
     return True
 
 
-def optimize_route_order(route, dist_matrix):
-    """
-    Google OR-Tools Open-TSP Solver (Guided Local Search):
-    Finds the optimal one-way stop sequence starting from the Ajman Warehouse (node 0)
-    and ending at the final stop without returning to the warehouse.
-    """
-    if not route:
-        return [], 0.0
-    if len(route) == 1:
-        return list(route), dist_matrix[0][route[0]]
+def get_primary_route_label(route, valid_stops):
+    city_bags = {}
+    for node in route:
+        c = valid_stops[node - 1]["city"]
+        city_bags[c] = city_bags.get(c, 0) + valid_stops[node - 1]["bags"]
 
-    # Nodes in sub-problem: 0 = Warehouse, 1..len(route) = route stops, len(route)+1 = Dummy open sink
-    sub_nodes = [0] + list(route)
-    num_sub = len(sub_nodes)
-    sink_idx = num_sub  # Open-end dummy node with 0 distance from any stop
+    for dc in ["Al Ain", "Abu Dhabi", "Fujairah / East Coast", "Ras Al Khaimah"]:
+        if dc in city_bags:
+            other = [c for c in city_bags if c != dc]
+            return f"{dc} + {', '.join(other)} Waypoints" if other else dc
 
-    manager = pywrapcp.RoutingIndexManager(num_sub + 1, 1, [0], [sink_idx])
-    routing = pywrapcp.RoutingModel(manager)
-
-    def distance_callback(from_index, to_index):
-        from_node = manager.IndexToNode(from_index)
-        to_node = manager.IndexToNode(to_index)
-        if from_node == sink_idx or to_node == sink_idx:
-            return 0
-        real_from = sub_nodes[from_node]
-        real_to = sub_nodes[to_node]
-        return int(round(dist_matrix[real_from][real_to] * 1000))
-
-    transit_cb_idx = routing.RegisterTransitCallback(distance_callback)
-    routing.SetArcCostEvaluatorOfAllVehicles(transit_cb_idx)
-
-    search_params = pywrapcp.DefaultRoutingSearchParameters()
-    search_params.first_solution_strategy = routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC
-    search_params.local_search_metaheuristic = routing_enums_pb2.LocalSearchMetaheuristic.GUIDED_LOCAL_SEARCH
-    search_params.time_limit.FromMilliseconds(250)
-
-    solution = routing.SolveWithParameters(search_params)
-    if solution:
-        ordered = []
-        index = routing.Start(0)
-        while not routing.IsEnd(index):
-            node = manager.IndexToNode(index)
-            if 1 <= node < sink_idx:
-                ordered.append(sub_nodes[node])
-            index = solution.Value(routing.NextVar(index))
-
-        total_km = dist_matrix[0][ordered[0]]
-        for k in range(len(ordered) - 1):
-            total_km += dist_matrix[ordered[k]][ordered[k + 1]]
-        return ordered, total_km
-
-    # Fallback if solver times out
-    unvisited = set(route)
-    ordered = []
-    curr = 0
-    while unvisited:
-        nxt = min(unvisited, key=lambda n: dist_matrix[curr][n])
-        ordered.append(nxt)
-        unvisited.remove(nxt)
-        curr = nxt
-    total_km = dist_matrix[0][ordered[0]] + sum(dist_matrix[ordered[k]][ordered[k + 1]] for k in range(len(ordered) - 1))
-    return ordered, total_km
+    sorted_c = sorted(city_bags.keys(), key=lambda c: city_bags[c], reverse=True)
+    return " / ".join(sorted_c)
 
 
 def build_balanced_morning_routes(dist_matrix, valid_stops, target_drivers, max_capacity, min_capacity, max_route_km):
-    """
-    Combines Scikit-Learn Agglomerative Road-Network Clustering with
-    Google OR-Tools route sequencing, capacity splitting, and highway relief.
-    """
     num_stops = len(valid_stops)
-    if num_stops == 0:
-        return []
-
     demand_list = [s["bags"] for s in valid_stops]
     city_list = [s["city"] for s in valid_stops]
-    total_bags = sum(demand_list)
 
-    min_drivers_needed = math.ceil(total_bags / max_capacity)
-    k_clusters = min(max(target_drivers, min_drivers_needed), len(FLEET_DRIVERS), num_stops)
-
-    # ------------------------------------------------------------------
-    # STAGE 1: SCIKIT-LEARN AGGLOMERATIVE CLUSTERING ON ROAD MATRIX
-    # ------------------------------------------------------------------
-    stop_dist_matrix = np.zeros((num_stops, num_stops))
-    for i in range(num_stops):
-        for j in range(num_stops):
-            if i != j:
-                road_d = 0.5 * (dist_matrix[i + 1][j + 1] + dist_matrix[j + 1][i + 1])
-                if not are_cities_compatible({city_list[i]}, {city_list[j]}):
-                    road_d += 10000.0  # Hard directional barrier for Scikit-Learn
-                elif city_list[i] == city_list[j] and city_list[i] in DISTANT_CITIES:
-                    road_d *= 0.25     # Keep distant cities tightly grouped together
-                stop_dist_matrix[i, j] = road_d
-
-    if num_stops > k_clusters:
-        clustering = AgglomerativeClustering(
-            n_clusters=k_clusters,
-            metric="precomputed",
-            linkage="average"
-        )
-        labels = clustering.fit_predict(stop_dist_matrix)
-        raw_clusters = {}
-        for stop_idx, lbl in enumerate(labels, start=1):
-            raw_clusters.setdefault(int(lbl), []).append(stop_idx)
-        initial_routes = list(raw_clusters.values())
-    else:
-        initial_routes = [[i] for i in range(1, num_stops + 1)]
+    routes = [[i] for i in range(1, num_stops + 1)]
 
     def route_bags(r):
         return sum(demand_list[n - 1] for n in r)
@@ -508,34 +388,44 @@ def build_balanced_morning_routes(dist_matrix, valid_stops, target_drivers, max_
     def route_cities(r):
         return set(city_list[n - 1] for n in r)
 
-    # ------------------------------------------------------------------
-    # STAGE 2: SPLIT ANY OVER-CAPACITY CLUSTER (>21 BAGS) USING OR-TOOLS
-    # ------------------------------------------------------------------
-    routes = []
-    for cluster in initial_routes:
-        ordered_c, _ = optimize_route_order(cluster, dist_matrix)
-        if route_bags(ordered_c) <= max_capacity:
-            routes.append(ordered_c)
-        else:
-            current_chunk = []
-            current_bags = 0
-            for node in ordered_c:
-                b = demand_list[node - 1]
-                if current_bags + b <= max_capacity:
-                    current_chunk.append(node)
-                    current_bags += b
-                else:
-                    if current_chunk:
-                        routes.append(optimize_route_order(current_chunk, dist_matrix)[0])
-                    current_chunk = [node]
-                    current_bags = b
-            if current_chunk:
-                routes.append(optimize_route_order(current_chunk, dist_matrix)[0])
+    def find_route(node):
+        for idx, r in enumerate(routes):
+            if node in r:
+                return idx
+        return -1
 
-    # ------------------------------------------------------------------
-    # STAGE 3: MERGE COMPATIBLE CORRIDORS DOWN TO TARGET DRIVERS
-    # ------------------------------------------------------------------
-    while len(routes) > k_clusters:
+    def try_merge(i_node, j_node, require_same_city=False):
+        r_i, r_j = find_route(i_node), find_route(j_node)
+        if r_i == -1 or r_j == -1 or r_i == r_j:
+            return False
+        c_i, c_j = route_cities(routes[r_i]), route_cities(routes[r_j])
+        if require_same_city and c_i != c_j:
+            return False
+        if not are_cities_compatible(c_i, c_j):
+            return False
+
+        comb = routes[r_i] + routes[r_j]
+        if route_bags(comb) <= max_capacity:
+            ordered, km = optimize_route_order(comb, dist_matrix)
+            if km <= max_route_km:
+                routes[r_i] = ordered
+                routes.pop(r_j)
+                return True
+        return False
+
+    same_city_pairs = []
+    for i in range(1, num_stops + 1):
+        for j in range(i + 1, num_stops + 1):
+            if city_list[i - 1] == city_list[j - 1]:
+                score = (min(dist_matrix[0][i], dist_matrix[0][j]) * 2.0) - (dist_matrix[i][j] * 4.0)
+                if city_list[i - 1] in DISTANT_CITIES:
+                    score += 500.0
+                same_city_pairs.append((score, i, j))
+    same_city_pairs.sort(key=lambda x: x[0], reverse=True)
+    for _, i, j in same_city_pairs:
+        try_merge(i, j, require_same_city=True)
+
+    while len(routes) > target_drivers:
         best_pair, best_score = None, -float("inf")
         for a in range(len(routes)):
             for b in range(a + 1, len(routes)):
@@ -558,9 +448,6 @@ def build_balanced_morning_routes(dist_matrix, valid_stops, target_drivers, max_
         else:
             break
 
-    # ------------------------------------------------------------------
-    # STAGE 4: ABSORB TINY ROUTES (1-5 BAGS) & APPLY HIGHWAY RELIEF
-    # ------------------------------------------------------------------
     changed = True
     while changed and len(routes) > 1:
         changed = False
@@ -618,21 +505,6 @@ def build_balanced_morning_routes(dist_matrix, valid_stops, target_drivers, max_
             break
 
     return [optimize_route_order(r, dist_matrix)[0] for r in routes]
-
-
-def get_primary_route_label(route, valid_stops):
-    city_bags = {}
-    for node in route:
-        c = valid_stops[node - 1]["city"]
-        city_bags[c] = city_bags.get(c, 0) + valid_stops[node - 1]["bags"]
-
-    for dc in ["Al Ain", "Abu Dhabi", "Fujairah / East Coast", "Ras Al Khaimah"]:
-        if dc in city_bags:
-            other = [c for c in city_bags if c != dc]
-            return f"{dc} + {', '.join(other)} Waypoints" if other else dc
-
-    sorted_c = sorted(city_bags.keys(), key=lambda c: city_bags[c], reverse=True)
-    return " / ".join(sorted_c)
 
 
 def assign_drivers_with_rotation(routes, valid_stops, dist_matrix, far_yesterday_names, resting_today_names):
@@ -714,7 +586,7 @@ def resequence_driver_stops(driver_rows, wh_lat, wh_lon):
         row["Route_OneWay_KM"] = round(one_way_km, 2)
         reordered_rows.append(row)
 
-    est_finish, est_hrs = predict_driver_finish_time(reordered_rows)
+    est_finish, est_hrs = predict_driver_finish_time(reordered_rows, one_way_km)
     for row in reordered_rows:
         row["Est_Finish_Time"] = est_finish
         row["Est_Shift_Hours"] = est_hrs
@@ -733,12 +605,12 @@ def build_google_maps_nav_link(wh_lat, wh_lon, stops):
 
 
 # ==========================================
-# 6. SIDEBAR: SETTINGS & DRIVER ROTATION
+# 4. SIDEBAR SETTINGS
 # ==========================================
 db_stats = get_recent_driver_stats()
 default_far_yesterday = [d for d, st_info in db_stats.items() if st_info["went_far_yesterday"]]
 
-st.sidebar.title("🚚 AI Dispatch & Rotation")
+st.sidebar.title("🚚 Fast Dispatch & Rotation")
 uploaded_file = st.sidebar.file_uploader("1. Upload 'lion_delivery_all_bags.csv'", type=["csv"])
 
 st.sidebar.markdown("### 👥 Driver Rotation Rules")
@@ -747,14 +619,13 @@ far_yesterday_input = st.sidebar.multiselect(
     options=FLEET_DRIVERS,
     default=default_far_yesterday
 )
-
 resting_today_input = st.sidebar.multiselect(
     "Resting / Off Today:",
     options=FLEET_DRIVERS,
     default=[]
 )
 
-st.sidebar.markdown("### ⚙️ OR-Tools & Scikit-Learn Settings")
+st.sidebar.markdown("### ⚙️ Route Constraints")
 target_drivers_input = st.sidebar.slider("Target Morning Drivers", min_value=3, max_value=7, value=5)
 max_bags_input = st.sidebar.slider("Max Bags per Driver", min_value=15, max_value=25, value=21)
 min_bags_input = st.sidebar.slider("Min Bags per Driver (No tiny runs)", min_value=3, max_value=10, value=6)
@@ -762,10 +633,10 @@ max_dist_input = st.sidebar.number_input("Max Warehouse Road Distance (KM)", val
 
 
 # ==========================================
-# 7. MAIN APPLICATION PIPELINE
+# 5. MAIN APPLICATION PIPELINE
 # ==========================================
-st.title("Ajman Warehouse 6:30 AM AI Dispatch Portal")
-st.caption("Powered by Google OR-Tools (Guided Local Search) & Scikit-Learn (Road-Network Clustering + Random Forest ETA)")
+st.title("Ajman Warehouse 6:30 AM Dispatch Portal")
+st.caption("Fast Heuristic Engine — Instant Rendering")
 
 wh_lat, wh_lon = resolve_google_maps_url(WAREHOUSE_URL)
 if not wh_lat:
@@ -773,7 +644,7 @@ if not wh_lat:
     st.stop()
 
 if uploaded_file is None:
-    st.info("👋 Upload today's scraped `lion_delivery_all_bags.csv` in the sidebar to run OR-Tools & Scikit-Learn optimization.")
+    st.info("👋 Upload today's scraped `lion_delivery_all_bags.csv` in the sidebar to generate instant routes.")
     with st.expander("📊 View 7-Day Driver Rotation History"):
         hist_rows = [
             {
@@ -794,8 +665,8 @@ raw_rows = list(reader)
 fieldnames = reader.fieldnames or []
 bag_col = fieldnames[0] if fieldnames else "Bag_Number"
 
-if "dispatch_data" not in st.session_state or st.sidebar.button("🔄 Re-Run OR-Tools & Scikit-Learn"):
-    with st.spinner("Running Scikit-Learn Road Clustering, Google OR-Tools Solver, and Random Forest ETA..."):
+if "dispatch_data" not in st.session_state or st.sidebar.button("🔄 Re-Run Fast Optimization"):
+    with st.spinner("Processing coordinates and assigning drivers..."):
         resolved, unresolvable, oman_stops = [], [], []
         url_col = next((c for c in fieldnames if any(k in c.lower() for k in ["url", "link", "map", "location"])), None)
 
@@ -878,7 +749,7 @@ if "dispatch_data" not in st.session_state or st.sidebar.button("🔄 Re-Run OR-
                 })
                 route_temp_rows.append(item)
 
-            est_finish, est_hrs = predict_driver_finish_time(route_temp_rows)
+            est_finish, est_hrs = predict_driver_finish_time(route_temp_rows, total_km)
             for item in route_temp_rows:
                 item["Est_Finish_Time"] = est_finish
                 item["Est_Shift_Hours"] = est_hrs
@@ -945,12 +816,12 @@ kpi1, kpi2, kpi3, kpi4 = st.columns(4)
 kpi1.metric("Active Drivers (6:30 AM)", f"{len(active_driver_ids)} / 7")
 kpi2.metric("Total Bags Assigned", total_bags_assigned)
 kpi3.metric("Resting Drivers Today", ", ".join(resting_drivers_today) if resting_drivers_today else "None")
-kpi4.metric("Excluded Stops (>180km / Oman)", len(excluded_bags))
+kpi4.metric("Excluded Stops", len(excluded_bags))
 
 # ==========================================
-# 8. MANUAL STOP & DRIVER SWAP CONTROLS
+# 6. MANUAL CONTROLS
 # ==========================================
-ctrl_tab1, ctrl_tab2 = st.tabs(["🔄 Move Single Bag (OR-Tools Re-Sequence)", "🔀 Swap Drivers Between Routes"])
+ctrl_tab1, ctrl_tab2 = st.tabs(["🔄 Move Single Bag", "🔀 Swap Drivers Between Routes"])
 
 with ctrl_tab1:
     col_re1, col_re2, col_re3 = st.columns([3, 2, 1.5])
@@ -978,7 +849,7 @@ with ctrl_tab1:
 
             for affected_drv in [old_drv, target_driver_choice]:
                 if "NOT GOING" not in affected_drv:
-                    d_indices = [i for i, r in enumerate(master_rows) if r.get("Driver_ID") == affected_drv]
+                    d_indices = [i for i, r in enumerate(master_rows) if r.get("Driver_ID"] == affected_drv]
                     d_rows = [master_rows[i] for i in d_indices]
                     updated_rows = resequence_driver_stops(d_rows, wh_lat, wh_lon)
                     for i, updated_row in zip(d_indices, updated_rows):
@@ -1017,13 +888,13 @@ with ctrl_tab2:
             st.rerun()
 
 # ==========================================
-# 9. INTERACTIVE MAP (SNAP-TO-ROADS)
+# 7. MAP RENDER
 # ==========================================
 m = folium.Map(location=[wh_lat, wh_lon], zoom_start=9, tiles=None, control_scale=True)
 Fullscreen(position="topleft").add_to(m)
 
 folium.TileLayer("https://mt1.google.com/vt/lyrs=m&x={x}&y={y}&z={z}", attr="Google Maps", name="Google Maps", control=True).add_to(m)
-folium.Marker(location=[wh_lat, wh_lon], popup="Ajman Warehouse (6:30 AM)", icon=folium.Icon(color="black", icon="home", prefix="fa")).add_to(m)
+folium.Marker(location=[wh_lat, wh_lon], popup="Ajman Warehouse", icon=folium.Icon(color="black", icon="home", prefix="fa")).add_to(m)
 
 for d_idx, d_name in enumerate(active_driver_ids):
     color = DRIVER_COLORS[d_idx % len(DRIVER_COLORS)]
@@ -1042,16 +913,10 @@ for d_idx, d_name in enumerate(active_driver_ids):
             f'{s["Stop_Sequence"]}</div>'
         )
         badge = folium.DivIcon(html=badge_html, icon_size=(22, 22), icon_anchor=(11, 11))
-        popup_text = (
-            f"<b>{d_name} — Stop #{s['Stop_Sequence']}</b><br>"
-            f"Bag: {s.get(bag_col, '')}<br>"
-            f"City: {s.get('City_Area', '')}<br>"
-            f"RF Est. Finish: {s.get('Est_Finish_Time', '')}"
-        )
         folium.Marker(
             location=[float(s["Resolved_Lat"]), float(s["Resolved_Lon"])],
-            popup=popup_text,
-            tooltip=f"{s.get(bag_col, '')} • Stop #{s['Stop_Sequence']} • {d_name}",
+            popup=f"<b>{d_name} — Stop #{s['Stop_Sequence']}</b><br>Bag: {s.get(bag_col, '')}<br>Est. Finish: {s.get('Est_Finish_Time', '')}",
+            tooltip=f"{s.get(bag_col, '')} (Stop #{s['Stop_Sequence']})",
             icon=badge
         ).add_to(m)
 
@@ -1060,7 +925,6 @@ for ex_stop in excluded_bags:
     is_om = "OMAN" in ex_stop["Driver_ID"]
     icon_color = "#e65100" if is_om else "#212121"
     label = "OUTSIDE UAE (OMAN)" if is_om else "TOO FAR (>180km)"
-
     warn_html = (
         f'<div style="background:{icon_color}; color:#fff; border-radius:50%; '
         f'width:22px; height:22px; text-align:center; font-weight:bold; '
@@ -1077,7 +941,7 @@ for ex_stop in excluded_bags:
 st_folium(m, width="100%", height=500)
 
 # ==========================================
-# 10. EXPORT, ROTATION LOG & WHATSAPP CARDS
+# 8. EXPORT & WHATSAPP CARDS
 # ==========================================
 out_fields = list(fieldnames) + [
     "Assigned_Driver", "Driver_ID", "Stop_Sequence", "City_Area",
@@ -1115,6 +979,6 @@ for d_name in active_driver_ids:
 
     st.markdown(
         f"**{d_name}** — **{len(d_stops)} bags** | **{one_way_km} km** | "
-        f"🤖 RF Est. Finish: **{est_fin}** ({est_hrs} hrs) — [🗺️ Open Route in Google Maps ↗]({nav_link})\n"
+        f"⏱️ Est. Finish: **{est_fin}** ({est_hrs} hrs) — [🗺️ Open Route in Google Maps ↗]({nav_link})\n"
         f"> *Stop Order:* `{bag_list_str}`"
     )
