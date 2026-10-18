@@ -13,7 +13,7 @@ import streamlit as st
 from streamlit_folium import st_folium
 
 # ==========================================
-# PAGE CONFIGURATION & FLEET ROSTER
+# PAGE CONFIGURATION
 # ==========================================
 st.set_page_config(
     page_title="Lion Delivery Dispatch Portal",
@@ -605,12 +605,20 @@ def build_google_maps_nav_link(wh_lat, wh_lon, stops):
 
 
 # ==========================================
-# 4. SIDEBAR SETTINGS
+# 4. SIDEBAR SETTINGS & DRIVER MAP FILTER
 # ==========================================
 db_stats = get_recent_driver_stats()
 default_far_yesterday = [d for d, st_info in db_stats.items() if st_info["went_far_yesterday"]]
 
 st.sidebar.title("🚚 Fast Dispatch & Rotation")
+
+# Driver Map Filter Dropdown (Added back here)
+selected_driver_filter = st.sidebar.selectbox(
+    "🔍 Filter Map by Driver",
+    options=["Show All Drivers"] + FLEET_DRIVERS,
+    index=0
+)
+
 uploaded_file = st.sidebar.file_uploader("1. Upload 'lion_delivery_all_bags.csv'", type=["csv"])
 
 st.sidebar.markdown("### 👥 Driver Rotation Rules")
@@ -635,9 +643,6 @@ max_dist_input = st.sidebar.number_input("Max Warehouse Road Distance (KM)", val
 # ==========================================
 # 5. MAIN APPLICATION PIPELINE
 # ==========================================
-st.title("Ajman Warehouse 6:30 AM Dispatch Portal")
-st.caption("Fast Heuristic Engine — Instant Rendering")
-
 wh_lat, wh_lon = resolve_google_maps_url(WAREHOUSE_URL)
 if not wh_lat:
     st.error("Failed to resolve warehouse coordinates from URL.")
@@ -813,9 +818,9 @@ total_bags_assigned = sum(int(float(r.get("Bags", 1) or 1)) for r in master_rows
 excluded_bags = [r for r in master_rows if "NOT GOING" in r["Driver_ID"]]
 
 kpi1, kpi2, kpi3, kpi4 = st.columns(4)
-kpi1.metric("Active Drivers (6:30 AM)", f"{len(active_driver_ids)} / 7")
+kpi1.metric("Active Drivers", f"{len(active_driver_ids)} / 7")
 kpi2.metric("Total Bags Assigned", total_bags_assigned)
-kpi3.metric("Resting Drivers Today", ", ".join(resting_drivers_today) if resting_drivers_today else "None")
+kpi3.metric("Resting Drivers", ", ".join(resting_drivers_today) if resting_drivers_today else "None")
 kpi4.metric("Excluded Stops", len(excluded_bags))
 
 # ==========================================
@@ -888,31 +893,61 @@ with ctrl_tab2:
             st.rerun()
 
 # ==========================================
-# 7. MAP RENDER
+# 7. LARGE MAP RENDER (DRIVER FILTER & MAP TILES)
 # ==========================================
 m = folium.Map(location=[wh_lat, wh_lon], zoom_start=9, tiles=None, control_scale=True)
 Fullscreen(position="topleft").add_to(m)
 
-folium.TileLayer("https://mt1.google.com/vt/lyrs=m&x={x}&y={y}&z={z}", attr="Google Maps", name="Google Maps", control=True).add_to(m)
+# 1. Google Maps Streets Tile Layer
+folium.TileLayer(
+    "https://mt1.google.com/vt/lyrs=m&x={x}&y={y}&z={z}",
+    attr="Google Maps",
+    name="Google Maps (Streets)",
+    control=True
+).add_to(m)
+
+# 2. Esri Street Map Tile Layer
+folium.TileLayer(
+    "https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}",
+    attr="Esri",
+    name="Esri Street Map",
+    control=True
+).add_to(m)
+
 folium.Marker(location=[wh_lat, wh_lon], popup="Ajman Warehouse", icon=folium.Icon(color="black", icon="home", prefix="fa")).add_to(m)
 
+# Filter drivers based on sidebar dropdown selection
+filtered_driver_ids = active_driver_ids
+if selected_driver_filter != "Show All Drivers":
+    filtered_driver_ids = [d_id for d_id in active_driver_ids if selected_driver_filter.lower() in d_id.lower()]
+
+route_coords_for_bounds = [(wh_lat, wh_lon)]
+
 for d_idx, d_name in enumerate(active_driver_ids):
+    # Skip rendering if a specific driver is selected and this isn't them
+    if selected_driver_filter != "Show All Drivers" and selected_driver_filter.lower() not in d_name.lower():
+        continue
+
     color = DRIVER_COLORS[d_idx % len(DRIVER_COLORS)]
     d_stops = [r for r in master_rows if r["Driver_ID"] == d_name]
     d_stops.sort(key=lambda x: int(x["Stop_Sequence"]))
 
     waypoints = [(wh_lat, wh_lon)] + [(float(s["Resolved_Lat"]), float(s["Resolved_Lon"])) for s in d_stops]
+    
+    for pt in waypoints:
+        route_coords_for_bounds.append(pt)
+
     road_polyline = get_osrm_route_geometry(waypoints)
-    AntPath(locations=road_polyline, color=color, weight=4, opacity=0.85, tooltip=d_name).add_to(m)
+    AntPath(locations=road_polyline, color=color, weight=5, opacity=0.9, tooltip=d_name).add_to(m)
 
     for s in d_stops:
         badge_html = (
             f'<div style="background:{color}; color:#fff; border-radius:50%; '
-            f'width:22px; height:22px; text-align:center; font-weight:bold; '
-            f'font-size:11px; line-height:22px; border:2px solid #fff;">'
+            f'width:24px; height:24px; text-align:center; font-weight:bold; '
+            f'font-size:11px; line-height:24px; border:2px solid #fff;">'
             f'{s["Stop_Sequence"]}</div>'
         )
-        badge = folium.DivIcon(html=badge_html, icon_size=(22, 22), icon_anchor=(11, 11))
+        badge = folium.DivIcon(html=badge_html, icon_size=(24, 24), icon_anchor=(12, 12))
         folium.Marker(
             location=[float(s["Resolved_Lat"]), float(s["Resolved_Lon"])],
             popup=f"<b>{d_name} — Stop #{s['Stop_Sequence']}</b><br>Bag: {s.get(bag_col, '')}<br>Est. Finish: {s.get('Est_Finish_Time', '')}",
@@ -920,25 +955,34 @@ for d_idx, d_name in enumerate(active_driver_ids):
             icon=badge
         ).add_to(m)
 
-for ex_stop in excluded_bags:
-    lat, lon = float(ex_stop["Resolved_Lat"]), float(ex_stop["Resolved_Lon"])
-    is_om = "OMAN" in ex_stop["Driver_ID"]
-    icon_color = "#e65100" if is_om else "#212121"
-    label = "OUTSIDE UAE (OMAN)" if is_om else "TOO FAR (>180km)"
-    warn_html = (
-        f'<div style="background:{icon_color}; color:#fff; border-radius:50%; '
-        f'width:22px; height:22px; text-align:center; font-weight:bold; '
-        f'font-size:11px; line-height:22px; border:2px solid #fff;">✕</div>'
-    )
-    warn_badge = folium.DivIcon(html=warn_html, icon_size=(22, 22), icon_anchor=(11, 11))
-    folium.Marker(
-        location=[lat, lon],
-        popup=f"<b>🚫 {label}</b><br>Bag: {ex_stop.get(bag_col, '')}",
-        tooltip=f"🚫 {label}: {ex_stop.get(bag_col, '')}",
-        icon=warn_badge
-    ).add_to(m)
+# If filtering by a single driver, zoom the map directly onto their route bounds
+if selected_driver_filter != "Show All Drivers" and len(route_coords_for_bounds) > 1:
+    lats = [c[0] for c in route_coords_for_bounds]
+    lons = [c[1] for c in route_coords_for_bounds]
+    m.fit_bounds([[min(lats), min(lons)], [max(lats), max(lons)]], padding=(40, 40))
 
-st_folium(m, width="100%", height=500)
+# Plot excluded stops only when viewing all drivers
+if selected_driver_filter == "Show All Drivers":
+    for ex_stop in excluded_bags:
+        lat, lon = float(ex_stop["Resolved_Lat"]), float(ex_stop["Resolved_Lon"])
+        is_om = "OMAN" in ex_stop["Driver_ID"]
+        icon_color = "#e65100" if is_om else "#212121"
+        label = "OUTSIDE UAE (OMAN)" if is_om else "TOO FAR (>180km)"
+        warn_html = (
+            f'<div style="background:{icon_color}; color:#fff; border-radius:50%; '
+            f'width:24px; height:24px; text-align:center; font-weight:bold; '
+            f'font-size:11px; line-height:24px; border:2px solid #fff;">✕</div>'
+        )
+        warn_badge = folium.DivIcon(html=warn_html, icon_size=(24, 24), icon_anchor=(12, 12))
+        folium.Marker(
+            location=[lat, lon],
+            popup=f"<b>🚫 {label}</b><br>Bag: {ex_stop.get(bag_col, '')}",
+            tooltip=f"🚫 {label}: {ex_stop.get(bag_col, '')}",
+            icon=warn_badge
+        ).add_to(m)
+
+folium.LayerControl(collapsed=False, position="topright").add_to(m)
+st_folium(m, width="100%", height=750)
 
 # ==========================================
 # 8. EXPORT & WHATSAPP CARDS
@@ -967,8 +1011,11 @@ if btn_col2.button("💾 Confirm & Log Today's Routes to Rotation History"):
     log_dispatch_to_db(master_rows)
     st.success("✅ Saved today's driver assignments to rotation history!")
 
-st.subheader("📲 6:30 AM Driver Dispatch Cards (WhatsApp Ready)")
+st.subheader("📲 Driver Lists & Google Maps Navigation Links")
 for d_name in active_driver_ids:
+    if selected_driver_filter != "Show All Drivers" and selected_driver_filter.lower() not in d_name.lower():
+        continue
+
     d_stops = [r for r in master_rows if r["Driver_ID"] == d_name]
     d_stops.sort(key=lambda x: int(x["Stop_Sequence"]))
     nav_link = build_google_maps_nav_link(wh_lat, wh_lon, d_stops)
@@ -979,6 +1026,6 @@ for d_name in active_driver_ids:
 
     st.markdown(
         f"**{d_name}** — **{len(d_stops)} bags** | **{one_way_km} km** | "
-        f"⏱️ Est. Finish: **{est_fin}** ({est_hrs} hrs) — [🗺️ Open Route in Google Maps ↗]({nav_link})\n"
-        f"> *Stop Order:* `{bag_list_str}`"
+        f"⏱️ Est. Finish: **{est_fin}** ({est_hrs} hrs) — [🗺️ Open Navigation in Google Maps ↗]({nav_link})\n"
+        f"> *Stop Sequence:* `{bag_list_str}`"
     )
