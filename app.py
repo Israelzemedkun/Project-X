@@ -1,4 +1,4 @@
-import csv
+﻿import csv
 import io
 import math
 import os
@@ -16,8 +16,8 @@ from streamlit_folium import st_folium
 # PAGE CONFIGURATION (VERSION 1.0)
 # ==========================================
 st.set_page_config(
-    page_title="Lion Delivery Dispatch v1.0",
-    page_icon="🚚",
+    page_title="Lion Delivery Dispatch v2.0 (TEST)",
+    page_icon="ðŸšš",
     layout="wide"
 )
 
@@ -641,7 +641,7 @@ def build_google_maps_nav_links(wh_lat, wh_lon, stops):
         part_num = (start_i // chunk_size) + 1
         s_first = chunk[0]["Stop_Sequence"]
         s_last = chunk[-1]["Stop_Sequence"]
-        label = "🗺️ Open Route in Google Maps ↗" if len(stops) <= chunk_size else f"🗺️ Part {part_num} (Stops #{s_first}–#{s_last}) ↗"
+        label = "ðŸ—ºï¸ Open Route in Google Maps â†—" if len(stops) <= chunk_size else f"ðŸ—ºï¸ Part {part_num} (Stops #{s_first}â€“#{s_last}) â†—"
         links.append((label, "https://www.google.com/maps/dir/" + "/".join(pts)))
 
     return links
@@ -653,17 +653,17 @@ def build_google_maps_nav_links(wh_lat, wh_lon, stops):
 db_stats = get_recent_driver_stats()
 default_far_yesterday = [d for d, st_info in db_stats.items() if st_info["went_far_yesterday"]]
 
-st.sidebar.title("🚚 Dispatch & Rotation")
+st.sidebar.title("ðŸšš Dispatch & Rotation")
 
 selected_driver_filter = st.sidebar.selectbox(
-    "🔍 View Driver on Map",
+    "ðŸ” View Driver on Map",
     options=["Show All Drivers"] + FLEET_DRIVERS,
     index=0
 )
 
 uploaded_file = st.sidebar.file_uploader("1. Upload 'lion_delivery_all_bags.csv'", type=["csv"])
 
-st.sidebar.markdown("### 👥 Driver Rotation Rules")
+st.sidebar.markdown("### ðŸ‘¥ Driver Rotation Rules")
 far_yesterday_input = st.sidebar.multiselect(
     "Went Far Yesterday (Al Ain / Abu Dhabi / Fujairah / RAK):",
     options=FLEET_DRIVERS,
@@ -675,7 +675,7 @@ resting_today_input = st.sidebar.multiselect(
     default=[]
 )
 
-st.sidebar.markdown("### ⚙️ Route Constraints")
+st.sidebar.markdown("### âš™ï¸ Route Constraints")
 target_drivers_input = st.sidebar.slider("Target Morning Drivers", min_value=3, max_value=7, value=5)
 max_bags_input = st.sidebar.slider("Max Bags per Driver", min_value=15, max_value=25, value=21)
 min_bags_input = st.sidebar.slider("Min Bags per Driver (No tiny runs)", min_value=3, max_value=10, value=6)
@@ -691,8 +691,8 @@ if not wh_lat:
     st.stop()
 
 if uploaded_file is None:
-    st.info("👋 Upload today's scraped `lion_delivery_all_bags.csv` in the sidebar to generate instant routes.")
-    with st.expander("📊 View 7-Day Driver Rotation History"):
+    st.info("ðŸ‘‹ Upload today's scraped `lion_delivery_all_bags.csv` in the sidebar to generate instant routes.")
+    with st.expander("ðŸ“Š View 7-Day Driver Rotation History"):
         hist_rows = [
             {
                 "Driver": d,
@@ -725,7 +725,7 @@ current_config_sig = (
     tuple(sorted(resting_today_input))
 )
 
-force_rerun = st.sidebar.button("🔄 Re-Run Fast Optimization")
+force_rerun = st.sidebar.button("ðŸ”„ Re-Run Fast Optimization")
 
 if (
     "dispatch_data" not in st.session_state
@@ -892,7 +892,7 @@ kpi4.metric("Excluded Stops", len(excluded_bags))
 # ==========================================
 # 6. MANUAL CONTROLS
 # ==========================================
-ctrl_tab1, ctrl_tab2 = st.tabs(["🔄 Move Single Bag", "🔀 Swap Drivers Between Routes"])
+ctrl_tab1, ctrl_tab2 = st.tabs(["ðŸ”„ Move Single Bag", "ðŸ”€ Swap Drivers Between Routes"])
 
 with ctrl_tab1:
     col_re1, col_re2, col_re3 = st.columns([3, 2, 1.5])
@@ -944,7 +944,7 @@ with ctrl_tab2:
     sc1, sc2, sc3 = st.columns([2, 2, 1.5])
     swap_driver_a = sc1.selectbox("Driver 1", options=FLEET_DRIVERS, index=0)
     swap_driver_b = sc2.selectbox("Driver 2", options=FLEET_DRIVERS, index=1)
-    if sc3.button("🔀 Swap Entire Route"):
+    if sc3.button("ðŸ”€ Swap Entire Route"):
         if swap_driver_a != swap_driver_b:
             for r in master_rows:
                 curr_d = r.get("Assigned_Driver", "")
@@ -1049,19 +1049,19 @@ for d_idx, d_name in enumerate(active_driver_ids):
         badge = folium.DivIcon(html=badge_html, icon_size=(24, 24), icon_anchor=(12, 12))
         popup_html = (
             f'<div style="font-family:Arial,sans-serif; font-size:12px; min-width:190px;">'
-            f'<b>{d_name} — Stop #{s["Stop_Sequence"]}</b><br>'
+            f'<b>{d_name} â€” Stop #{s["Stop_Sequence"]}</b><br>'
             f'<b>Bag:</b> {s.get(bag_col, "")}<br>'
             f'<b>City:</b> {s.get("City_Area", "")}<br>'
             f'<b>From WH:</b> {s.get("Warehouse_Road_KM", "")} km (+{s.get("Leg_Distance_KM", "")} km leg)<br>'
             f'<b>Est. Finish:</b> {s.get("Est_Finish_Time", "")}<br>'
-            f'<a href="{pin_url}" target="_blank" style="color:#1a73e8; font-weight:bold;">Open Pin ↗</a> | '
-            f'<a href="{primary_nav_url}" target="_blank" style="color:#0b8043; font-weight:bold;">Driver Route ↗</a>'
+            f'<a href="{pin_url}" target="_blank" style="color:#1a73e8; font-weight:bold;">Open Pin â†—</a> | '
+            f'<a href="{primary_nav_url}" target="_blank" style="color:#0b8043; font-weight:bold;">Driver Route â†—</a>'
             f'</div>'
         )
         folium.Marker(
             location=[disp_lat, disp_lon],
             popup=folium.Popup(popup_html, max_width=280),
-            tooltip=f"{s.get(bag_col, '')} • Stop #{s['Stop_Sequence']} • {d_name}",
+            tooltip=f"{s.get(bag_col, '')} â€¢ Stop #{s['Stop_Sequence']} â€¢ {d_name}",
             icon=badge
         ).add_to(fg)
 
@@ -1071,13 +1071,13 @@ for d_idx, d_name in enumerate(active_driver_ids):
         f'<span style="display:inline-flex; align-items:center; margin-right:14px; margin-bottom:4px; white-space:nowrap;">'
         f'<span style="background:{color}; width:11px; height:11px; border-radius:50%; display:inline-block; margin-right:5px; border:1px solid #fff;"></span>'
         f'<b>{d_name}:</b>&nbsp;{total_bags} bags ({total_km} km)&nbsp;'
-        f'<a href="{primary_nav_url}" target="_blank" style="color:#1a73e8; text-decoration:none; font-weight:bold;">[🗺️ Nav]</a>'
+        f'<a href="{primary_nav_url}" target="_blank" style="color:#1a73e8; text-decoration:none; font-weight:bold;">[ðŸ—ºï¸ Nav]</a>'
         f'</span>'
     )
 
 # Plot excluded stops in their own toggleable layer when viewing all drivers
 if selected_driver_filter == "Show All Drivers" and excluded_bags:
-    ex_fg = folium.FeatureGroup(name=f"🚫 Excluded Stops ({len(excluded_bags)})", show=True)
+    ex_fg = folium.FeatureGroup(name=f"ðŸš« Excluded Stops ({len(excluded_bags)})", show=True)
     for ex_stop in excluded_bags:
         lat, lon = float(ex_stop["Resolved_Lat"]), float(ex_stop["Resolved_Lon"])
         route_coords_for_bounds.append((lat, lon))
@@ -1087,13 +1087,13 @@ if selected_driver_filter == "Show All Drivers" and excluded_bags:
         warn_html = (
             f'<div style="background:{icon_color}; color:#fff; border-radius:50%; '
             f'width:24px; height:24px; text-align:center; font-weight:bold; '
-            f'font-size:11px; line-height:24px; border:2px solid #ff5252;">✕</div>'
+            f'font-size:11px; line-height:24px; border:2px solid #ff5252;">âœ•</div>'
         )
         warn_badge = folium.DivIcon(html=warn_html, icon_size=(24, 24), icon_anchor=(12, 12))
         folium.Marker(
             location=[lat, lon],
-            popup=f"<b>🚫 {label}</b><br>Bag: {ex_stop.get(bag_col, '')}",
-            tooltip=f"🚫 {label}: {ex_stop.get(bag_col, '')}",
+            popup=f"<b>ðŸš« {label}</b><br>Bag: {ex_stop.get(bag_col, '')}",
+            tooltip=f"ðŸš« {label}: {ex_stop.get(bag_col, '')}",
             icon=warn_badge
         ).add_to(ex_fg)
     ex_fg.add_to(m)
@@ -1110,7 +1110,7 @@ if legend_chips:
         'background:rgba(255,255,255,0.94); padding:7px 12px; border-radius:8px; '
         'box-shadow:0 2px 8px rgba(0,0,0,0.25); font-family:Arial,sans-serif; '
         'font-size:12px; display:flex; flex-wrap:wrap; align-items:center;">'
-        '<span style="margin-right:14px; font-weight:bold;">🏠 Ajman WH</span>'
+        '<span style="margin-right:14px; font-weight:bold;">ðŸ  Ajman WH</span>'
         + "".join(legend_chips) +
         '</div>'
     )
@@ -1138,17 +1138,17 @@ writer.writerows(master_rows)
 
 btn_col1, btn_col2 = st.columns(2)
 btn_col1.download_button(
-    label="📥 Download Today's Dispatch Plan (CSV)",
+    label="ðŸ“¥ Download Today's Dispatch Plan (CSV)",
     data=csv_buffer.getvalue().encode("utf-8-sig"),
     file_name=f"dispatch_plan_{date.today().isoformat()}.csv",
     mime="text/csv"
 )
 
-if btn_col2.button("💾 Confirm & Log Today's Routes to Rotation History"):
+if btn_col2.button("ðŸ’¾ Confirm & Log Today's Routes to Rotation History"):
     log_dispatch_to_db(master_rows)
-    st.success("✅ Saved today's driver assignments to rotation history!")
+    st.success("âœ… Saved today's driver assignments to rotation history!")
 
-st.subheader("📲 Driver Lists & Google Maps Navigation Links")
+st.subheader("ðŸ“² Driver Lists & Google Maps Navigation Links")
 for d_name in active_driver_ids:
     if selected_driver_filter != "Show All Drivers" and selected_driver_filter.lower() not in d_name.lower():
         continue
@@ -1164,7 +1164,7 @@ for d_name in active_driver_ids:
     bag_list_str = ", ".join(f"#{s['Stop_Sequence']}: {s.get(bag_col, '')}" for s in d_stops)
 
     st.markdown(
-        f"**{d_name}** — **{len(d_stops)} bags** | **{one_way_km} km** | "
-        f"⏱️ Est. Finish: **{est_fin}** ({est_hrs} hrs) — {links_md}\n"
+        f"**{d_name}** â€” **{len(d_stops)} bags** | **{one_way_km} km** | "
+        f"â±ï¸ Est. Finish: **{est_fin}** ({est_hrs} hrs) â€” {links_md}\n"
         f"> *Stop Sequence:* `{bag_list_str}`"
     )
