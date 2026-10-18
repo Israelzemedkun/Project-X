@@ -13,10 +13,10 @@ import streamlit as st
 from streamlit_folium import st_folium
 
 # ==========================================
-# PAGE CONFIGURATION
+# PAGE CONFIGURATION (VERSION 1.0)
 # ==========================================
 st.set_page_config(
-    page_title="Lion Delivery Dispatch Portal",
+    page_title="Lion Delivery Dispatch v1.0",
     page_icon="🚚",
     layout="wide"
 )
@@ -134,9 +134,9 @@ def log_dispatch_to_db(master_rows):
 
 def predict_driver_finish_time(stops, total_one_way_km):
     if not stops:
-        return "01:30 PM", 6.0
+        return "06:30 AM", 0.0
     total_bags = sum(int(float(s.get("Bags", 1) or 1)) for s in stops)
-    est_hours = round(2.0 + (total_one_way_km / 45.0) + (total_bags * 0.15), 1)
+    est_hours = round(1.5 + (total_one_way_km / 48.0) + (total_bags * 0.14), 1)
     start_time = datetime.strptime("06:30", "%H:%M")
     finish_dt = start_time + timedelta(hours=est_hours)
     return finish_dt.strftime("%I:%M %p"), est_hours
@@ -146,16 +146,21 @@ def predict_driver_finish_time(stops, total_one_way_km):
 # 2. BORDER CONTROL & UAE GEOFENCING
 # ==========================================
 def is_in_oman(lat, lon):
+    # 1. Madha Enclave (Oman enclave inside Fujairah/Sharjah)
     if 25.240 <= lat <= 25.345 and 56.270 <= lon <= 56.380:
         return True
+    # 2. Musandam & Dibba Al-Baya (North of UAE)
     if lat >= 26.04:
         return True
     if lat >= 25.620 and lon >= 56.275:
         return True
+    # 3. Al Buraimi & Mahdah (East of Al Ain border)
     if 24.15 <= lat <= 24.45 and lon >= 55.775:
         return True
+    # 4. East of Hatta / Al Wajajah border
     if 24.78 <= lat <= 24.88 and lon >= 56.140:
         return True
+    # 5. General South/East of UAE border fence
     if lat < 24.0 and lon >= 55.80:
         return True
     return False
@@ -169,7 +174,7 @@ def resolve_google_maps_url(url):
     if not url:
         return None, None
 
-    unquoted = urllib.parse.unquote(url)
+    unquoted = urllib.parse.unquote(str(url).strip())
     patterns = [
         r"!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)",
         r"[?&]q=(-?\d+\.\d+)\s*,\s*[+]?(-?\d+\.\d+)",
@@ -377,8 +382,16 @@ def get_primary_route_label(route, valid_stops):
 
 def build_balanced_morning_routes(dist_matrix, valid_stops, target_drivers, max_capacity, min_capacity, max_route_km):
     num_stops = len(valid_stops)
+    if num_stops == 0:
+        return []
+
     demand_list = [s["bags"] for s in valid_stops]
     city_list = [s["city"] for s in valid_stops]
+    total_deliverable_bags = sum(demand_list)
+
+    # Auto-scale active driver count if total volume exceeds target_drivers * max_capacity
+    min_drivers_for_capacity = math.ceil(total_deliverable_bags / max_capacity)
+    active_target = min(max(target_drivers, min_drivers_for_capacity), len(FLEET_DRIVERS))
 
     routes = [[i] for i in range(1, num_stops + 1)]
 
@@ -413,6 +426,7 @@ def build_balanced_morning_routes(dist_matrix, valid_stops, target_drivers, max_
                 return True
         return False
 
+    # Stage 1: Lock same-city clusters
     same_city_pairs = []
     for i in range(1, num_stops + 1):
         for j in range(i + 1, num_stops + 1):
@@ -425,7 +439,8 @@ def build_balanced_morning_routes(dist_matrix, valid_stops, target_drivers, max_
     for _, i, j in same_city_pairs:
         try_merge(i, j, require_same_city=True)
 
-    while len(routes) > target_drivers:
+    # Stage 2: Merge compatible corridors down to active_target
+    while len(routes) > active_target:
         best_pair, best_score = None, -float("inf")
         for a in range(len(routes)):
             for b in range(a + 1, len(routes)):
@@ -448,6 +463,7 @@ def build_balanced_morning_routes(dist_matrix, valid_stops, target_drivers, max_
         else:
             break
 
+    # Stage 3: Absorb tiny 1-5 bag routes
     changed = True
     while changed and len(routes) > 1:
         changed = False
@@ -477,6 +493,7 @@ def build_balanced_morning_routes(dist_matrix, valid_stops, target_drivers, max_
                 routes = [optimize_route_order(r, dist_matrix)[0] for r in temp]
                 changed = True
 
+    # Stage 4: Highway backfill / relief
     while True:
         best_t, best_d = None, float("inf")
         for l_idx, l_r in enumerate(routes):
@@ -528,7 +545,7 @@ def assign_drivers_with_rotation(routes, valid_stops, dist_matrix, far_yesterday
     else:
         active_drivers = list(available_pool)
         for d in resting_today_names:
-            if len(active_drivers) < num_routes:
+            if len(active_drivers) < num_routes and d not in active_drivers:
                 active_drivers.append(d)
 
     route_meta = []
@@ -556,7 +573,8 @@ def assign_drivers_with_rotation(routes, valid_stops, dist_matrix, far_yesterday
     ordered_driver_queue = fresh_drivers + rotated_drivers
 
     assigned_pairs = []
-    for meta, d_name in zip(route_meta, ordered_driver_queue):
+    for idx, meta in enumerate(route_meta):
+        d_name = ordered_driver_queue[idx] if idx < len(ordered_driver_queue) else f"Driver {idx + 1}"
         assigned_pairs.append((d_name, meta["route"]))
 
     return assigned_pairs
@@ -594,14 +612,39 @@ def resequence_driver_stops(driver_rows, wh_lat, wh_lon):
     return reordered_rows
 
 
-def build_google_maps_nav_link(wh_lat, wh_lon, stops):
-    pts = [f"{wh_lat:.6f},{wh_lon:.6f}"]
-    for s in stops[:9]:
-        lat, lon = float(s['Resolved_Lat']), float(s['Resolved_Lon'])
-        if lon >= 56.0 and f"{UAE_MASAFI_WAYPOINT[0]},{UAE_MASAFI_WAYPOINT[1]}" not in pts:
-            pts.append(f"{UAE_MASAFI_WAYPOINT[0]:.6f},{UAE_MASAFI_WAYPOINT[1]:.6f}")
-        pts.append(f"{lat:.6f},{lon:.6f}")
-    return "https://www.google.com/maps/dir/" + "/".join(pts)
+def build_google_maps_nav_links(wh_lat, wh_lon, stops):
+    """
+    Build multi-stop Google Maps navigation URLs.
+    Splits routes > 9 stops into Part 1 (Stops 1-9), Part 2 (Stops 10-18), etc.,
+    so Google Maps never truncates stops beyond its 10-waypoint URL limit.
+    """
+    if not stops:
+        return []
+
+    links = []
+    chunk_size = 9
+    for start_i in range(0, len(stops), chunk_size):
+        chunk = stops[start_i:start_i + chunk_size]
+        if start_i == 0:
+            origin_pt = f"{wh_lat:.6f},{wh_lon:.6f}"
+        else:
+            prev_s = stops[start_i - 1]
+            origin_pt = f"{float(prev_s['Resolved_Lat']):.6f},{float(prev_s['Resolved_Lon']):.6f}"
+
+        pts = [origin_pt]
+        for s in chunk:
+            lat, lon = float(s["Resolved_Lat"]), float(s["Resolved_Lon"])
+            if lon >= 56.0 and f"{UAE_MASAFI_WAYPOINT[0]:.6f},{UAE_MASAFI_WAYPOINT[1]:.6f}" not in pts:
+                pts.append(f"{UAE_MASAFI_WAYPOINT[0]:.6f},{UAE_MASAFI_WAYPOINT[1]:.6f}")
+            pts.append(f"{lat:.6f},{lon:.6f}")
+
+        part_num = (start_i // chunk_size) + 1
+        s_first = chunk[0]["Stop_Sequence"]
+        s_last = chunk[-1]["Stop_Sequence"]
+        label = "🗺️ Open Route in Google Maps ↗" if len(stops) <= chunk_size else f"🗺️ Part {part_num} (Stops #{s_first}–#{s_last}) ↗"
+        links.append((label, "https://www.google.com/maps/dir/" + "/".join(pts)))
+
+    return links
 
 
 # ==========================================
@@ -610,11 +653,10 @@ def build_google_maps_nav_link(wh_lat, wh_lon, stops):
 db_stats = get_recent_driver_stats()
 default_far_yesterday = [d for d, st_info in db_stats.items() if st_info["went_far_yesterday"]]
 
-st.sidebar.title("🚚 Fast Dispatch & Rotation")
+st.sidebar.title("🚚 Dispatch & Rotation")
 
-# Driver Map Filter Dropdown (Added back here)
 selected_driver_filter = st.sidebar.selectbox(
-    "🔍 Filter Map by Driver",
+    "🔍 View Driver on Map",
     options=["Show All Drivers"] + FLEET_DRIVERS,
     index=0
 )
@@ -664,13 +706,32 @@ if uploaded_file is None:
         st.table(hist_rows)
     st.stop()
 
-content = uploaded_file.getvalue().decode("utf-8-sig").splitlines()
+raw_bytes = uploaded_file.getvalue()
+content = raw_bytes.decode("utf-8-sig").splitlines()
 reader = csv.DictReader(content)
 raw_rows = list(reader)
 fieldnames = reader.fieldnames or []
 bag_col = fieldnames[0] if fieldnames else "Bag_Number"
 
-if "dispatch_data" not in st.session_state or st.sidebar.button("🔄 Re-Run Fast Optimization"):
+# Auto-detect if file or any sidebar parameter changed
+current_config_sig = (
+    uploaded_file.name,
+    len(raw_bytes),
+    target_drivers_input,
+    max_bags_input,
+    min_bags_input,
+    max_dist_input,
+    tuple(sorted(far_yesterday_input)),
+    tuple(sorted(resting_today_input))
+)
+
+force_rerun = st.sidebar.button("🔄 Re-Run Fast Optimization")
+
+if (
+    "dispatch_data" not in st.session_state
+    or st.session_state.get("config_sig") != current_config_sig
+    or force_rerun
+):
     with st.spinner("Processing coordinates and assigning drivers..."):
         resolved, unresolvable, oman_stops = [], [], []
         url_col = next((c for c in fieldnames if any(k in c.lower() for k in ["url", "link", "map", "location"])), None)
@@ -696,6 +757,10 @@ if "dispatch_data" not in st.session_state or st.sidebar.button("🔄 Re-Run Fas
                     })
             else:
                 unresolvable.append(row)
+
+        if not resolved:
+            st.error("Could not resolve valid UAE coordinates from the uploaded CSV. Check your Map_URL column.")
+            st.stop()
 
         all_coords = [(wh_lat, wh_lon)] + [(s["lat"], s["lon"]) for s in resolved]
         full_matrix = build_road_distance_matrix(all_coords)
@@ -799,6 +864,7 @@ if "dispatch_data" not in st.session_state or st.sidebar.button("🔄 Re-Run Fas
             final_rows.append(item)
 
         st.session_state["dispatch_data"] = final_rows
+        st.session_state["config_sig"] = current_config_sig
 
 master_rows = st.session_state["dispatch_data"]
 
@@ -849,8 +915,10 @@ with ctrl_tab1:
             master_rows[selected_bag_idx]["Driver_ID"] = target_driver_choice
             if "NOT GOING" not in target_driver_choice:
                 master_rows[selected_bag_idx]["Assigned_Driver"] = target_driver_choice.split(" (")[0]
+                master_rows[selected_bag_idx]["Dispatch_Status"] = "ASSIGNED_MANUAL_OVERRIDE"
             else:
                 master_rows[selected_bag_idx]["Assigned_Driver"] = "NOT GOING"
+                master_rows[selected_bag_idx]["Dispatch_Status"] = "MANUAL_EXCLUDED"
 
             for affected_drv in [old_drv, target_driver_choice]:
                 if "NOT GOING" not in affected_drv:
@@ -893,38 +961,48 @@ with ctrl_tab2:
             st.rerun()
 
 # ==========================================
-# 7. LARGE MAP RENDER (DRIVER FILTER & MAP TILES)
+# 7. LARGE MAP RENDER (FEATURE GROUPS + LEGEND + TILES)
 # ==========================================
 m = folium.Map(location=[wh_lat, wh_lon], zoom_start=9, tiles=None, control_scale=True)
-Fullscreen(position="topleft").add_to(m)
+Fullscreen(position="topleft", force_separate_button=True).add_to(m)
 
-# 1. Google Maps Streets Tile Layer
+# Base Map Switcher: Google Maps, Esri Street Map, and Google Satellite
 folium.TileLayer(
     "https://mt1.google.com/vt/lyrs=m&x={x}&y={y}&z={z}",
     attr="Google Maps",
     name="Google Maps (Streets)",
+    overlay=False,
     control=True
 ).add_to(m)
 
-# 2. Esri Street Map Tile Layer
 folium.TileLayer(
     "https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}",
     attr="Esri",
     name="Esri Street Map",
+    overlay=False,
     control=True
 ).add_to(m)
 
-folium.Marker(location=[wh_lat, wh_lon], popup="Ajman Warehouse", icon=folium.Icon(color="black", icon="home", prefix="fa")).add_to(m)
+folium.TileLayer(
+    "https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}",
+    attr="Google Satellite",
+    name="Google Satellite + Roads",
+    overlay=False,
+    control=True
+).add_to(m)
 
-# Filter drivers based on sidebar dropdown selection
-filtered_driver_ids = active_driver_ids
-if selected_driver_filter != "Show All Drivers":
-    filtered_driver_ids = [d_id for d_id in active_driver_ids if selected_driver_filter.lower() in d_id.lower()]
+folium.Marker(
+    location=[wh_lat, wh_lon],
+    popup="<b>Ajman Warehouse (6:30 AM Start)</b>",
+    tooltip="Ajman Warehouse",
+    icon=folium.Icon(color="black", icon="home", prefix="fa")
+).add_to(m)
 
 route_coords_for_bounds = [(wh_lat, wh_lon)]
+legend_chips = []
+seen_marker_coords = {}
 
 for d_idx, d_name in enumerate(active_driver_ids):
-    # Skip rendering if a specific driver is selected and this isn't them
     if selected_driver_filter != "Show All Drivers" and selected_driver_filter.lower() not in d_name.lower():
         continue
 
@@ -932,46 +1010,84 @@ for d_idx, d_name in enumerate(active_driver_ids):
     d_stops = [r for r in master_rows if r["Driver_ID"] == d_name]
     d_stops.sort(key=lambda x: int(x["Stop_Sequence"]))
 
+    if not d_stops:
+        continue
+
+    total_bags = d_stops[0].get("Route_Total_Bags", len(d_stops))
+    total_km = d_stops[0].get("Route_OneWay_KM", "0")
+    nav_links = build_google_maps_nav_links(wh_lat, wh_lon, d_stops)
+    primary_nav_url = nav_links[0][1] if nav_links else "#"
+
+    # FeatureGroup lets you toggle individual drivers on/off in the top-right layer box
+    fg = folium.FeatureGroup(name=f"{d_name} ({total_bags} bags | {total_km} km)", show=True)
+
     waypoints = [(wh_lat, wh_lon)] + [(float(s["Resolved_Lat"]), float(s["Resolved_Lon"])) for s in d_stops]
-    
     for pt in waypoints:
         route_coords_for_bounds.append(pt)
 
     road_polyline = get_osrm_route_geometry(waypoints)
-    AntPath(locations=road_polyline, color=color, weight=5, opacity=0.9, tooltip=d_name).add_to(m)
+    AntPath(locations=road_polyline, color=color, weight=5, opacity=0.88, tooltip=d_name).add_to(fg)
 
     for s in d_stops:
+        raw_lat, raw_lon = float(s["Resolved_Lat"]), float(s["Resolved_Lon"])
+        coord_key = (round(raw_lat, 5), round(raw_lon, 5))
+        dup_count = seen_marker_coords.get(coord_key, 0)
+        seen_marker_coords[coord_key] = dup_count + 1
+
+        # Offset identical pins by ~15m visually so stacked bag numbers don't hide each other
+        disp_lat = raw_lat + (dup_count * 0.00014)
+        disp_lon = raw_lon + (dup_count * 0.00014)
+
+        pin_url = f"https://www.google.com/maps?q={raw_lat},{raw_lon}"
         badge_html = (
             f'<div style="background:{color}; color:#fff; border-radius:50%; '
             f'width:24px; height:24px; text-align:center; font-weight:bold; '
-            f'font-size:11px; line-height:24px; border:2px solid #fff;">'
+            f'font-size:11px; line-height:24px; border:2px solid #fff; '
+            f'box-shadow:0 2px 4px rgba(0,0,0,0.4);">'
             f'{s["Stop_Sequence"]}</div>'
         )
         badge = folium.DivIcon(html=badge_html, icon_size=(24, 24), icon_anchor=(12, 12))
+        popup_html = (
+            f'<div style="font-family:Arial,sans-serif; font-size:12px; min-width:190px;">'
+            f'<b>{d_name} — Stop #{s["Stop_Sequence"]}</b><br>'
+            f'<b>Bag:</b> {s.get(bag_col, "")}<br>'
+            f'<b>City:</b> {s.get("City_Area", "")}<br>'
+            f'<b>From WH:</b> {s.get("Warehouse_Road_KM", "")} km (+{s.get("Leg_Distance_KM", "")} km leg)<br>'
+            f'<b>Est. Finish:</b> {s.get("Est_Finish_Time", "")}<br>'
+            f'<a href="{pin_url}" target="_blank" style="color:#1a73e8; font-weight:bold;">Open Pin ↗</a> | '
+            f'<a href="{primary_nav_url}" target="_blank" style="color:#0b8043; font-weight:bold;">Driver Route ↗</a>'
+            f'</div>'
+        )
         folium.Marker(
-            location=[float(s["Resolved_Lat"]), float(s["Resolved_Lon"])],
-            popup=f"<b>{d_name} — Stop #{s['Stop_Sequence']}</b><br>Bag: {s.get(bag_col, '')}<br>Est. Finish: {s.get('Est_Finish_Time', '')}",
-            tooltip=f"{s.get(bag_col, '')} (Stop #{s['Stop_Sequence']})",
+            location=[disp_lat, disp_lon],
+            popup=folium.Popup(popup_html, max_width=280),
+            tooltip=f"{s.get(bag_col, '')} • Stop #{s['Stop_Sequence']} • {d_name}",
             icon=badge
-        ).add_to(m)
+        ).add_to(fg)
 
-# If filtering by a single driver, zoom the map directly onto their route bounds
-if selected_driver_filter != "Show All Drivers" and len(route_coords_for_bounds) > 1:
-    lats = [c[0] for c in route_coords_for_bounds]
-    lons = [c[1] for c in route_coords_for_bounds]
-    m.fit_bounds([[min(lats), min(lons)], [max(lats), max(lons)]], padding=(40, 40))
+    fg.add_to(m)
 
-# Plot excluded stops only when viewing all drivers
-if selected_driver_filter == "Show All Drivers":
+    legend_chips.append(
+        f'<span style="display:inline-flex; align-items:center; margin-right:14px; margin-bottom:4px; white-space:nowrap;">'
+        f'<span style="background:{color}; width:11px; height:11px; border-radius:50%; display:inline-block; margin-right:5px; border:1px solid #fff;"></span>'
+        f'<b>{d_name}:</b>&nbsp;{total_bags} bags ({total_km} km)&nbsp;'
+        f'<a href="{primary_nav_url}" target="_blank" style="color:#1a73e8; text-decoration:none; font-weight:bold;">[🗺️ Nav]</a>'
+        f'</span>'
+    )
+
+# Plot excluded stops in their own toggleable layer when viewing all drivers
+if selected_driver_filter == "Show All Drivers" and excluded_bags:
+    ex_fg = folium.FeatureGroup(name=f"🚫 Excluded Stops ({len(excluded_bags)})", show=True)
     for ex_stop in excluded_bags:
         lat, lon = float(ex_stop["Resolved_Lat"]), float(ex_stop["Resolved_Lon"])
+        route_coords_for_bounds.append((lat, lon))
         is_om = "OMAN" in ex_stop["Driver_ID"]
         icon_color = "#e65100" if is_om else "#212121"
-        label = "OUTSIDE UAE (OMAN)" if is_om else "TOO FAR (>180km)"
+        label = "OUTSIDE UAE (OMAN)" if is_om else f"TOO FAR ({ex_stop.get('Warehouse_Road_KM', '>180')} km)"
         warn_html = (
             f'<div style="background:{icon_color}; color:#fff; border-radius:50%; '
             f'width:24px; height:24px; text-align:center; font-weight:bold; '
-            f'font-size:11px; line-height:24px; border:2px solid #fff;">✕</div>'
+            f'font-size:11px; line-height:24px; border:2px solid #ff5252;">✕</div>'
         )
         warn_badge = folium.DivIcon(html=warn_html, icon_size=(24, 24), icon_anchor=(12, 12))
         folium.Marker(
@@ -979,10 +1095,31 @@ if selected_driver_filter == "Show All Drivers":
             popup=f"<b>🚫 {label}</b><br>Bag: {ex_stop.get(bag_col, '')}",
             tooltip=f"🚫 {label}: {ex_stop.get(bag_col, '')}",
             icon=warn_badge
-        ).add_to(m)
+        ).add_to(ex_fg)
+    ex_fg.add_to(m)
+
+if len(route_coords_for_bounds) > 1:
+    lats = [c[0] for c in route_coords_for_bounds]
+    lons = [c[1] for c in route_coords_for_bounds]
+    m.fit_bounds([[min(lats), min(lons)], [max(lats), max(lons)]], padding=(35, 35))
+
+# Floating bottom summary bar (matches your original screenshot)
+if legend_chips:
+    bottom_bar_html = (
+        '<div style="position:fixed; bottom:10px; left:10px; right:10px; z-index:9999; '
+        'background:rgba(255,255,255,0.94); padding:7px 12px; border-radius:8px; '
+        'box-shadow:0 2px 8px rgba(0,0,0,0.25); font-family:Arial,sans-serif; '
+        'font-size:12px; display:flex; flex-wrap:wrap; align-items:center;">'
+        '<span style="margin-right:14px; font-weight:bold;">🏠 Ajman WH</span>'
+        + "".join(legend_chips) +
+        '</div>'
+    )
+    m.get_root().html.add_child(folium.Element(bottom_bar_html))
 
 folium.LayerControl(collapsed=False, position="topright").add_to(m)
-st_folium(m, width="100%", height=750)
+
+# returned_objects=[] prevents Streamlit from reloading the page when panning/zooming
+st_folium(m, width="100%", height=750, returned_objects=[])
 
 # ==========================================
 # 8. EXPORT & WHATSAPP CARDS
@@ -1018,7 +1155,9 @@ for d_name in active_driver_ids:
 
     d_stops = [r for r in master_rows if r["Driver_ID"] == d_name]
     d_stops.sort(key=lambda x: int(x["Stop_Sequence"]))
-    nav_link = build_google_maps_nav_link(wh_lat, wh_lon, d_stops)
+    nav_links = build_google_maps_nav_links(wh_lat, wh_lon, d_stops)
+    links_md = " | ".join(f"[{lbl}]({url})" for lbl, url in nav_links)
+
     one_way_km = d_stops[0].get("Route_OneWay_KM", "0")
     est_fin = d_stops[0].get("Est_Finish_Time", "")
     est_hrs = d_stops[0].get("Est_Shift_Hours", "")
@@ -1026,6 +1165,6 @@ for d_name in active_driver_ids:
 
     st.markdown(
         f"**{d_name}** — **{len(d_stops)} bags** | **{one_way_km} km** | "
-        f"⏱️ Est. Finish: **{est_fin}** ({est_hrs} hrs) — [🗺️ Open Navigation in Google Maps ↗]({nav_link})\n"
+        f"⏱️ Est. Finish: **{est_fin}** ({est_hrs} hrs) — {links_md}\n"
         f"> *Stop Sequence:* `{bag_list_str}`"
     )
