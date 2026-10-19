@@ -13,11 +13,11 @@ import streamlit as st
 from streamlit_folium import st_folium
 
 # ==========================================
-# PAGE CONFIGURATION (VERSION 1.0)
+# PAGE CONFIGURATION (VERSION 2.0)
 # ==========================================
 st.set_page_config(
-    page_title="Lion Delivery Dispatch v2.0 (TEST)",
-    page_icon="ðŸšš",
+    page_title="Lion Delivery Dispatch v2.0",
+    page_icon="🚚",
     layout="wide"
 )
 
@@ -49,7 +49,7 @@ DRIVER_COLORS = [
 
 session = requests.Session()
 session.headers.update({
-    "User-Agent": "LionDeliveryDispatchApp/1.0 (dispatch-portal; contact@liondelivery.local)"
+    "User-Agent": "LionDeliveryDispatchApp/2.0 (dispatch-portal-v2; contact@liondelivery.local)"
 })
 
 
@@ -136,17 +136,17 @@ def predict_driver_finish_time(stops, total_one_way_km):
     if not stops:
         return "06:30 AM", 0.0
     total_bags = sum(int(float(s.get("Bags", 1) or 1)) for s in stops)
-    est_hours = round(1.5 + (total_one_way_km / 48.0) + (total_bags * 0.14), 1)
+    est_hours = round(1.5 + (total_one_way_km / 50.0) + (total_bags * 0.14), 1)
     start_time = datetime.strptime("06:30", "%H:%M")
     finish_dt = start_time + timedelta(hours=est_hours)
     return finish_dt.strftime("%I:%M %p"), est_hours
 
 
 # ==========================================
-# 2. BORDER CONTROL & UAE GEOFENCING
+# 2. BORDER CONTROL & GRANULAR UAE CITY DETECTION
 # ==========================================
 def is_in_oman(lat, lon):
-    # 1. Madha Enclave (Oman enclave inside Fujairah/Sharjah)
+    # 1. Madha Enclave (Oman enclave surrounded by Fujairah/Sharjah)
     if 25.240 <= lat <= 25.345 and 56.270 <= lon <= 56.380:
         return True
     # 2. Musandam & Dibba Al-Baya (North of UAE)
@@ -166,8 +166,37 @@ def is_in_oman(lat, lon):
     return False
 
 
+def identify_uae_city(lat, lon):
+    """
+    Granular UAE City & Corridor classification.
+    Splits Sharjah into:
+      - 'Sharjah (Near Dubai)': High-traffic border zone (Al Nahda, Al Khan, Al Majaz, Industrial Areas)
+      - 'Sharjah (North / Inland)': Easy highway return corridor (Muwaileh North, Rahmaniya, Sajaa, Dhaid)
+    """
+    if lat < 24.55 and lon >= 55.35:
+        return "Al Ain"
+    if lon < 54.95 or (lat < 24.70 and lon < 55.35):
+        return "Abu Dhabi"
+    if lon >= 56.05:
+        return "Fujairah / East Coast"
+    if lat >= 25.62 and lon >= 55.70:
+        return "Ras Al Khaimah"
+    if 25.48 <= lat < 25.62 and 55.50 <= lon < 55.85:
+        return "Umm Al Quwain"
+    if 25.365 <= lat < 25.48 and 55.40 <= lon <= 55.63:
+        return "Ajman"
+    if 25.25 <= lat < 25.40 and 55.34 <= lon <= 55.95:
+        # Sharjah close to Dubai border (Al Nahda, Al Khan, Al Taawun, Al Majaz, Ind. Areas)
+        if lat < 25.325 and lon < 55.475:
+            return "Sharjah (Near Dubai)"
+        return "Sharjah (North / Inland)"
+    if 24.80 <= lat < 25.32 and 54.95 <= lon <= 55.65:
+        return "Dubai"
+    return "Sharjah (North / Inland)"
+
+
 # ==========================================
-# 3. HELPER ROUTING & GEOMETRY FUNCTIONS
+# 3. URL RESOLUTION & OSRM ROAD MATRICES
 # ==========================================
 @st.cache_data(show_spinner=False)
 def resolve_google_maps_url(url):
@@ -242,26 +271,6 @@ def get_osrm_route_geometry(coords_latlon):
     return raw_path
 
 
-def identify_uae_city(lat, lon):
-    if lat < 24.55 and lon >= 55.35:
-        return "Al Ain"
-    if lon < 54.95 or (lat < 24.70 and lon < 55.35):
-        return "Abu Dhabi"
-    if lon >= 56.05:
-        return "Fujairah / East Coast"
-    if lat >= 25.62 and lon >= 55.70:
-        return "Ras Al Khaimah"
-    if 25.48 <= lat < 25.62 and 55.50 <= lon < 55.85:
-        return "Umm Al Quwain"
-    if 25.35 <= lat < 25.48 and 55.40 <= lon <= 55.65:
-        return "Ajman"
-    if 25.25 <= lat < 25.38 and 55.35 <= lon <= 55.75:
-        return "Sharjah"
-    if 24.80 <= lat < 25.32 and 54.95 <= lon <= 55.65:
-        return "Dubai"
-    return "Other UAE Corridor"
-
-
 def haversine_km(lat1, lon1, lat2, lon2):
     r = 6371.0
     phi1, phi2 = math.radians(lat1), math.radians(lat2)
@@ -281,7 +290,7 @@ def build_road_distance_matrix(coords):
             if i != j:
                 matrix[i][j] = haversine_km(coords[i][0], coords[i][1], coords[j][0], coords[j][1])
 
-    chunk_size = 45
+    chunk_size = 75
     chunks = [list(range(k, min(k + chunk_size, n))) for k in range(0, n, chunk_size)]
 
     try:
@@ -313,87 +322,216 @@ def build_road_distance_matrix(coords):
     return matrix
 
 
-def optimize_route_order(route, dist_matrix):
-    if not route:
-        return [], 0.0
+# ==========================================
+# 4. V2 SEQUENCING: PRIMARY CITY FIRST -> RETURN LEG SECOND
+# ==========================================
+def sequence_node_group(nodes, start_from_node, dist_matrix, end_pull_node=None, lock_first_node=None):
+    """
+    Order a subset of nodes using Nearest Neighbor + Open-Path 2-Opt.
+    If lock_first_node is given, forces that node to be visited first (e.g. farthest pin in Abu Dhabi/Al Ain).
+    If end_pull_node is given, 2-Opt minimizes the exit distance toward end_pull_node (return cluster).
+    """
+    if not nodes:
+        return []
+    if len(nodes) == 1:
+        return list(nodes)
 
-    unvisited = set(route)
+    unvisited = set(nodes)
     ordered = []
-    curr = 0
+
+    if lock_first_node is not None and lock_first_node in unvisited:
+        ordered.append(lock_first_node)
+        unvisited.remove(lock_first_node)
+        curr = lock_first_node
+    else:
+        curr = start_from_node
+
     while unvisited:
-        nxt = min(unvisited, key=lambda node: dist_matrix[curr][node])
+        nxt = min(unvisited, key=lambda n: dist_matrix[curr][n])
         ordered.append(nxt)
         unvisited.remove(nxt)
         curr = nxt
 
-    def route_distance(seq):
-        if not seq:
-            return 0.0
-        dist = dist_matrix[0][seq[0]]
+    def eval_seq(seq):
+        d = dist_matrix[start_from_node][seq[0]] if lock_first_node is None else 0.0
         for k in range(len(seq) - 1):
-            dist += dist_matrix[seq[k]][seq[k + 1]]
-        return dist
+            d += dist_matrix[seq[k]][seq[k + 1]]
+        if end_pull_node is not None:
+            d += 0.35 * dist_matrix[seq[-1]][end_pull_node]
+        return d
 
+    start_swap_idx = 1 if lock_first_node is not None else 0
     improved = True
-    while improved and len(ordered) > 1:
+    while improved and len(ordered) - start_swap_idx > 1:
         improved = False
-        best_dist = route_distance(ordered)
-        for i in range(len(ordered) - 1):
+        best_d = eval_seq(ordered)
+        for i in range(start_swap_idx, len(ordered) - 1):
             for j in range(i + 1, len(ordered)):
-                candidate = ordered[:i] + ordered[i:j + 1][::-1] + ordered[j + 1:]
-                cand_dist = route_distance(candidate)
-                if cand_dist + 1e-6 < best_dist:
-                    ordered = candidate
-                    best_dist = cand_dist
+                cand = ordered[:i] + ordered[i:j + 1][::-1] + ordered[j + 1:]
+                c_d = eval_seq(cand)
+                if c_d + 1e-6 < best_d:
+                    ordered = cand
+                    best_d = c_d
                     improved = True
 
-    return ordered, route_distance(ordered)
+    return ordered
 
 
-def are_cities_compatible(cities_a, cities_b):
+def optimize_route_order(route, dist_matrix, stop_cities=None):
+    """
+    V2 Two-Phase Route Sequencer:
+      - If the route contains Distant City stops (Al Ain, Abu Dhabi, Fujairah, RAK):
+        1. Primary Distant Stops are sequenced FIRST (starting at the farthest point and sweeping
+           inward toward the return corridor while local customers are still asleep).
+        2. Return-Leg Backfill Stops (Dubai, Sharjah, Ajman, UAQ) are sequenced SECOND on the way back.
+      - If the route is a Local Route (Dubai / Sharjah / Ajman):
+        Sequences stops cleanly one-way from the Ajman Warehouse (Node 0).
+    """
+    if not route:
+        return [], 0.0
+    if len(route) == 1:
+        return list(route), dist_matrix[0][route[0]]
+
+    if stop_cities is None:
+        ordered = sequence_node_group(route, 0, dist_matrix)
+    else:
+        primary_nodes = [n for n in route if stop_cities[n - 1] in DISTANT_CITIES]
+        backfill_nodes = [n for n in route if stop_cities[n - 1] not in DISTANT_CITIES]
+
+        if not primary_nodes:
+            # Pure local route (Dubai / Sharjah / Ajman)
+            ordered = sequence_node_group(route, 0, dist_matrix)
+        else:
+            # Determine return anchor (either the backfill cluster or Ajman Warehouse Node 0)
+            if backfill_nodes:
+                anchor = min(backfill_nodes, key=lambda b: dist_matrix[0][b])
+            else:
+                anchor = 0
+
+            # Start at the farthest primary stop so driver sweeps inward back toward Dubai/Sharjah/Ajman
+            farthest_primary = max(primary_nodes, key=lambda p: dist_matrix[anchor][p])
+            primary_seq = sequence_node_group(
+                primary_nodes,
+                start_from_node=0,
+                dist_matrix=dist_matrix,
+                end_pull_node=anchor,
+                lock_first_node=farthest_primary
+            )
+
+            if backfill_nodes:
+                backfill_seq = sequence_node_group(
+                    backfill_nodes,
+                    start_from_node=primary_seq[-1],
+                    dist_matrix=dist_matrix,
+                    end_pull_node=0
+                )
+            else:
+                backfill_seq = []
+
+            ordered = primary_seq + backfill_seq
+
+    total_km = dist_matrix[0][ordered[0]]
+    for k in range(len(ordered) - 1):
+        total_km += dist_matrix[ordered[k]][ordered[k + 1]]
+
+    return ordered, total_km
+
+
+# ==========================================
+# 5. V2 CORRIDOR CLUSTERING & MICRO-CLUSTER BACKFILL
+# ==========================================
+def are_cities_compatible_v2(cities_a, cities_b, allow_fuj_rak_combo=False):
     comb = cities_a | cities_b
-    if len(comb & DISTANT_CITIES) > 1:
-        return False
-    has_north = bool(comb & {"Ras Al Khaimah", "Umm Al Quwain"})
-    has_south = bool(comb & {"Dubai", "Abu Dhabi", "Al Ain"})
-    has_east = "Fujairah / East Coast" in comb
+    distant_in_comb = comb & DISTANT_CITIES
 
-    if has_north and (has_south or has_east):
+    # 1. Distant poles never mix, EXCEPT Fujairah + RAK when explicitly allowed (<10 bags rule)
+    if len(distant_in_comb) > 1:
+        if not (allow_fuj_rak_combo and distant_in_comb == {"Fujairah / East Coast", "Ras Al Khaimah"}):
+            return False
+
+    # 2. Fujairah or Ras Al Khaimah NEVER mix with 'Sharjah (Near Dubai)' or 'Dubai'
+    if distant_in_comb & {"Fujairah / East Coast", "Ras Al Khaimah"}:
+        if comb & {"Dubai", "Sharjah (Near Dubai)", "Abu Dhabi", "Al Ain"}:
+            return False
+
+    # 3. North (RAK / UAQ) never mixes with South (Dubai / Abu Dhabi / Al Ain / Sharjah Near Dubai)
+    has_north = bool(comb & {"Ras Al Khaimah", "Umm Al Quwain"})
+    has_south = bool(comb & {"Dubai", "Abu Dhabi", "Al Ain", "Sharjah (Near Dubai)"})
+    if has_north and has_south:
         return False
-    if has_east and (has_south or has_north):
-        return False
+
+    # 4. Abu Dhabi only backfills with Dubai or Sharjah (Near Dubai)
+    if "Abu Dhabi" in comb:
+        if comb & {"Ajman", "Umm Al Quwain", "Sharjah (North / Inland)"}:
+            return False
+
     return True
 
 
-def get_primary_route_label(route, valid_stops):
-    city_bags = {}
-    for node in route:
-        c = valid_stops[node - 1]["city"]
-        city_bags[c] = city_bags.get(c, 0) + valid_stops[node - 1]["bags"]
+def extract_micro_cluster(candidate_nodes, demand_list, dist_matrix, anchor_node, max_bags_to_add, max_radius_km=4.5):
+    """
+    Pick a tight micro-cluster of stops (seed stop + closest neighbors within max_radius_km)
+    so a returning long-haul driver drops 4-6 bags in a single compact area.
+    """
+    if not candidate_nodes or max_bags_to_add <= 0:
+        return []
 
-    for dc in ["Al Ain", "Abu Dhabi", "Fujairah / East Coast", "Ras Al Khaimah"]:
-        if dc in city_bags:
-            other = [c for c in city_bags if c != dc]
-            return f"{dc} + {', '.join(other)} Waypoints" if other else dc
+    best_cluster = []
+    best_score = float("inf")
 
-    sorted_c = sorted(city_bags.keys(), key=lambda c: city_bags[c], reverse=True)
-    return " / ".join(sorted_c)
+    for seed in candidate_nodes:
+        if demand_list[seed - 1] > max_bags_to_add:
+            continue
+
+        # Sort other candidates by road distance from this seed stop
+        neighbors = sorted(
+            [n for n in candidate_nodes if n != seed],
+            key=lambda n: max(dist_matrix[seed][n], dist_matrix[n][seed])
+        )
+
+        cluster = [seed]
+        cluster_bags = demand_list[seed - 1]
+        spread_km = 0.0
+
+        for nb in neighbors:
+            d_seed = max(dist_matrix[seed][nb], dist_matrix[nb][seed])
+            if d_seed > max_radius_km:
+                break
+            nb_bags = demand_list[nb - 1]
+            if cluster_bags + nb_bags <= max_bags_to_add:
+                cluster.append(nb)
+                cluster_bags += nb_bags
+                spread_km = max(spread_km, d_seed)
+            if cluster_bags == max_bags_to_add:
+                break
+
+        # Prefer clusters that get close to max_bags_to_add with tight internal spread and closeness to anchor
+        dist_from_anchor = dist_matrix[anchor_node][seed]
+        shortfall_penalty = (max_bags_to_add - cluster_bags) * 18.0
+        score = (spread_km * 4.0) + (dist_from_anchor * 0.25) + shortfall_penalty
+
+        if score < best_score:
+            best_score = score
+            best_cluster = cluster
+
+    return best_cluster
 
 
-def build_balanced_morning_routes(dist_matrix, valid_stops, target_drivers, max_capacity, min_capacity, max_route_km):
+def build_v2_morning_routes(
+    dist_matrix,
+    valid_stops,
+    target_drivers,
+    max_local_bags,
+    max_distant_bags,
+    min_driver_bags,
+    max_route_km
+):
     num_stops = len(valid_stops)
     if num_stops == 0:
         return []
 
     demand_list = [s["bags"] for s in valid_stops]
     city_list = [s["city"] for s in valid_stops]
-    total_deliverable_bags = sum(demand_list)
-
-    # Auto-scale active driver count if total volume exceeds target_drivers * max_capacity
-    min_drivers_for_capacity = math.ceil(total_deliverable_bags / max_capacity)
-    active_target = min(max(target_drivers, min_drivers_for_capacity), len(FLEET_DRIVERS))
-
-    routes = [[i] for i in range(1, num_stops + 1)]
 
     def route_bags(r):
         return sum(demand_list[n - 1] for n in r)
@@ -401,86 +539,249 @@ def build_balanced_morning_routes(dist_matrix, valid_stops, target_drivers, max_
     def route_cities(r):
         return set(city_list[n - 1] for n in r)
 
-    def find_route(node):
-        for idx, r in enumerate(routes):
-            if node in r:
-                return idx
-        return -1
+    # ------------------------------------------------------------------
+    # STEP 1: SEPARATE DISTANT POLES VS LOCAL STOPS
+    # ------------------------------------------------------------------
+    distant_Buckets = {dc: [] for dc in DISTANT_CITIES}
+    local_pool = []
 
-    def try_merge(i_node, j_node, require_same_city=False):
-        r_i, r_j = find_route(i_node), find_route(j_node)
-        if r_i == -1 or r_j == -1 or r_i == r_j:
-            return False
-        c_i, c_j = route_cities(routes[r_i]), route_cities(routes[r_j])
-        if require_same_city and c_i != c_j:
-            return False
-        if not are_cities_compatible(c_i, c_j):
-            return False
-
-        comb = routes[r_i] + routes[r_j]
-        if route_bags(comb) <= max_capacity:
-            ordered, km = optimize_route_order(comb, dist_matrix)
-            if km <= max_route_km:
-                routes[r_i] = ordered
-                routes.pop(r_j)
-                return True
-        return False
-
-    # Stage 1: Lock same-city clusters
-    same_city_pairs = []
-    for i in range(1, num_stops + 1):
-        for j in range(i + 1, num_stops + 1):
-            if city_list[i - 1] == city_list[j - 1]:
-                score = (min(dist_matrix[0][i], dist_matrix[0][j]) * 2.0) - (dist_matrix[i][j] * 4.0)
-                if city_list[i - 1] in DISTANT_CITIES:
-                    score += 500.0
-                same_city_pairs.append((score, i, j))
-    same_city_pairs.sort(key=lambda x: x[0], reverse=True)
-    for _, i, j in same_city_pairs:
-        try_merge(i, j, require_same_city=True)
-
-    # Stage 2: Merge compatible corridors down to active_target
-    while len(routes) > active_target:
-        best_pair, best_score = None, -float("inf")
-        for a in range(len(routes)):
-            for b in range(a + 1, len(routes)):
-                r_a, r_b = routes[a], routes[b]
-                if route_bags(r_a) + route_bags(r_b) > max_capacity:
-                    continue
-                if not are_cities_compatible(route_cities(r_a), route_cities(r_b)):
-                    continue
-                _, km_a = optimize_route_order(r_a, dist_matrix)
-                _, km_b = optimize_route_order(r_b, dist_matrix)
-                _, km_comb = optimize_route_order(r_a + r_b, dist_matrix)
-                if km_comb <= max_route_km:
-                    savings = (km_a + km_b) - km_comb
-                    score = savings + (40.0 if min(route_bags(r_a), route_bags(r_b)) < min_capacity else 0.0)
-                    if score > best_score:
-                        best_score, best_pair = score, (a, b)
-        if best_pair:
-            routes[best_pair[0]] = optimize_route_order(routes[best_pair[0]] + routes[best_pair[1]], dist_matrix)[0]
-            routes.pop(best_pair[1])
+    for node in range(1, num_stops + 1):
+        c = city_list[node - 1]
+        if c in DISTANT_CITIES:
+            distant_Buckets[c].append(node)
         else:
-            break
+            local_pool.append(node)
 
-    # Stage 3: Absorb tiny 1-5 bag routes
+    distant_routes = []
+    for dc in ["Al Ain", "Abu Dhabi", "Fujairah / East Coast", "Ras Al Khaimah"]:
+        nodes = distant_Buckets[dc]
+        if not nodes:
+            continue
+        ordered_dc, _ = optimize_route_order(nodes, dist_matrix, city_list)
+        # If a single distant city stays within physical car limit (21), keep it on 1 driver
+        if route_bags(ordered_dc) <= max_local_bags:
+            distant_routes.append(ordered_dc)
+        else:
+            # Split into 2 distant drivers only if the city itself exceeds 21 bags
+            chunk, c_bags = [], 0
+            for n in ordered_dc:
+                b = demand_list[n - 1]
+                if c_bags + b <= max_local_bags:
+                    chunk.append(n)
+                    c_bags += b
+                else:
+                    distant_routes.append(chunk)
+                    chunk, c_bags = [n], b
+            if chunk:
+                distant_routes.append(chunk)
+
+    # ------------------------------------------------------------------
+    # STEP 2: CONDITIONAL FUJAIRAH + RAS AL KHAIMAH COMBINATION (<10 BAGS)
+    # ------------------------------------------------------------------
+    fuj_routes = [r for r in distant_routes if route_cities(r) == {"Fujairah / East Coast"}]
+    rak_routes = [r for r in distant_routes if route_cities(r) == {"Ras Al Khaimah"}]
+    fuj_rak_combined = False
+
+    if len(fuj_routes) == 1 and len(rak_routes) == 1:
+        f_r, r_r = fuj_routes[0], rak_routes[0]
+        f_bags, r_bags = route_bags(f_r), route_bags(r_r)
+        # Only combine Fujairah + RAK if at least one of them is < min_driver_bags (10)
+        # AND their combined total fits within max_distant_bags (15-17)
+        if (f_bags < min_driver_bags or r_bags < min_driver_bags) and (f_bags + r_bags <= max_distant_bags):
+            distant_routes.remove(f_r)
+            distant_routes.remove(r_r)
+            combined_fr, _ = optimize_route_order(f_r + r_r, dist_matrix, city_list)
+            distant_routes.append(combined_fr)
+            fuj_rak_combined = True
+
+    # ------------------------------------------------------------------
+    # STEP 3: RETURN-LEG MICRO-CLUSTER BACKFILL ONTO DISTANT DRIVERS
+    # ------------------------------------------------------------------
+    # Calculate how many local bags exist vs how many local drivers remain
+    remaining_local_driver_slots = max(1, target_drivers - len(distant_routes))
+    local_total_bags = sum(demand_list[n - 1] for n in local_pool)
+
+    # Sort distant routes so Al Ain and Abu Dhabi get first pick of Sharjah/Dubai relief
+    # especially when Fujairah + RAK are combined on one driver
+    def distant_backfill_priority(r):
+        rc = route_cities(r)
+        if "Al Ain" in rc:
+            return 0
+        if "Abu Dhabi" in rc:
+            return 1
+        if len(rc & {"Fujairah / East Coast", "Ras Al Khaimah"}) == 2:
+            return 3  # Combined Fujairah+RAK gets backfill last (only if < min_driver_bags)
+        return 2
+
+    distant_routes.sort(key=distant_backfill_priority)
+
+    for d_route in distant_routes:
+        curr_bags = route_bags(d_route)
+        rc = route_cities(d_route)
+        is_combined_fr = len(rc & {"Fujairah / East Coast", "Ras Al Khaimah"}) == 2
+
+        # Determine how many backfill bags this distant driver should take:
+        # 1. Always try to bring any distant driver up to at least min_driver_bags (10)
+        # 2. If local pool has excess load (or Sharjah needs relief), fill up to max_distant_bags (15-17)
+        local_bags_left = sum(demand_list[n - 1] for n in local_pool)
+        local_pressure = local_bags_left > (remaining_local_driver_slots * (max_local_bags - 3))
+
+        if is_combined_fr and not local_pressure and curr_bags >= min_driver_bags:
+            continue
+
+        target_cap_for_this_driver = max_distant_bags if (local_pressure or curr_bags < max_distant_bags) else min_driver_bags
+        if is_combined_fr:
+            # Don't overload a combined Fujairah + RAK driver unless needed to hit min_driver_bags
+            target_cap_for_this_driver = min(max_distant_bags, max(curr_bags, min_driver_bags + 2))
+
+        bags_needed = max(0, target_cap_for_this_driver - curr_bags)
+        if bags_needed == 0 or not local_pool:
+            continue
+
+        # Select eligible return-leg candidate stops based on the primary city
+        if "Abu Dhabi" in rc:
+            # Abu Dhabi driver takes a tight micro-cluster in Dubai (or Sharjah Near Dubai if offloading Sharjah)
+            eligible = [n for n in local_pool if city_list[n - 1] in {"Dubai", "Sharjah (Near Dubai)"}]
+            radius = 4.0
+        elif "Al Ain" in rc:
+            # Al Ain driver relieves Sharjah (Near Dubai or North/Inland) and Ajman (or inland Dubai)
+            eligible = [
+                n for n in local_pool
+                if city_list[n - 1] in {"Sharjah (Near Dubai)", "Sharjah (North / Inland)", "Ajman"}
+            ]
+            if not eligible:
+                eligible = [n for n in local_pool if city_list[n - 1] == "Dubai"]
+            radius = 4.5
+        else:
+            # Fujairah or Ras Al Khaimah driver: ONLY Ajman, UAQ, or Sharjah (North / Inland)
+            # NEVER 'Sharjah (Near Dubai)' or 'Dubai'!
+            eligible = [
+                n for n in local_pool
+                if city_list[n - 1] in {"Ajman", "Umm Al Quwain", "Sharjah (North / Inland)"}
+            ]
+            radius = 5.0
+
+        if not eligible:
+            continue
+
+        ordered_primary, _ = optimize_route_order(d_route, dist_matrix, city_list)
+        exit_node = ordered_primary[-1]
+
+        micro_cluster = extract_micro_cluster(
+            candidate_nodes=eligible,
+            demand_list=demand_list,
+            dist_matrix=dist_matrix,
+            anchor_node=exit_node,
+            max_bags_to_add=bags_needed,
+            max_radius_km=radius
+        )
+
+        # If a single tight micro-cluster wasn't big enough, allow a second small cluster to reach target
+        for n in micro_cluster:
+            d_route.append(n)
+            local_pool.remove(n)
+
+        if route_bags(d_route) < min_driver_bags and local_pool:
+            still_needed = min_driver_bags - route_bags(d_route)
+            eligible_2 = [n for n in eligible if n in local_pool]
+            extra_cluster = extract_micro_cluster(
+                candidate_nodes=eligible_2,
+                demand_list=demand_list,
+                dist_matrix=dist_matrix,
+                anchor_node=d_route[-1],
+                max_bags_to_add=still_needed,
+                max_radius_km=radius + 3.0
+            )
+            for n in extra_cluster:
+                d_route.append(n)
+                local_pool.remove(n)
+
+    # ------------------------------------------------------------------
+    # STEP 4: CLUSTER REMAINING LOCAL STOPS (DUBAI / SHARJAH / AJMAN)
+    # ------------------------------------------------------------------
+    local_routes = [[n] for n in local_pool]
+
+    # Lock identical / same-building pins first
+    for i_idx in range(len(local_pool)):
+        for j_idx in range(i_idx + 1, len(local_pool)):
+            n_i, n_j = local_pool[i_idx], local_pool[j_idx]
+            if dist_matrix[n_i][n_j] < 0.15:
+                r_i = next(( idx for idx, r in enumerate(local_routes) if n_i in r), -1)
+                r_j = next(( idx for idx, r in enumerate(local_routes) if n_j in r), -1)
+                if r_i != -1 and r_j != -1 and r_i != r_j:
+                    if route_bags(local_routes[r_i]) + route_bags(local_routes[r_j]) <= max_local_bags:
+                        local_routes[r_i].extend(local_routes[r_j])
+                        local_routes.pop(r_j)
+
+    # Merge local stops by Clarke-Wright road savings down to remaining driver slots
+    total_deliverable_bags = sum(demand_list)
+    min_fleet_needed = math.ceil(total_deliverable_bags / max_local_bags)
+    overall_target = min(max(target_drivers, min_fleet_needed), len(FLEET_DRIVERS))
+    target_local_count = max(1, overall_target - len(distant_routes))
+
+    # First merge within the same local area (e.g. Dubai with Dubai, Sharjah with Sharjah)
+    for same_area_only in [True, False]:
+        while len(local_routes) > target_local_count:
+            best_pair, best_score = None, -float("inf")
+            for a in range(len(local_routes)):
+                for b in range(a + 1, len(local_routes)):
+                    r_a, r_b = local_routes[a], local_routes[b]
+                    if route_bags(r_a) + route_bags(r_b) > max_local_bags:
+                        continue
+                    c_a, c_b = route_cities(r_a), route_cities(r_b)
+                    if same_area_only and c_a != c_b:
+                        continue
+                    if not are_cities_compatible_v2(c_a, c_b):
+                        continue
+
+                    _, km_a = optimize_route_order(r_a, dist_matrix, city_list)
+                    _, km_b = optimize_route_order(r_b, dist_matrix, city_list)
+                    _, km_comb = optimize_route_order(r_a + r_b, dist_matrix, city_list)
+
+                    if km_comb <= max_route_km:
+                        savings = (km_a + km_b) - km_comb
+                        small_bonus = 35.0 if min(route_bags(r_a), route_bags(r_b)) < min_driver_bags else 0.0
+                        score = savings + small_bonus
+                        if score > best_score:
+                            best_score = score
+                            best_pair = (a, b)
+
+            if best_pair is not None:
+                i_a, i_b = best_pair
+                local_routes[i_a] = optimize_route_order(
+                    local_routes[i_a] + local_routes[i_b], dist_matrix, city_list
+                )[0]
+                local_routes.pop(i_b)
+            else:
+                break
+
+    all_routes = distant_routes + local_routes
+
+    # ------------------------------------------------------------------
+    # STEP 5: ABSORB ANY LEFTOVER SMALL ROUTES (< MIN_DRIVER_BAGS)
+    # ------------------------------------------------------------------
     changed = True
-    while changed and len(routes) > 1:
+    while changed and len(all_routes) > 1:
         changed = False
-        routes.sort(key=lambda r: route_bags(r))
-        smallest = routes[0]
-        if route_bags(smallest) < min_capacity:
-            temp = [list(r) for r in routes[1:]]
+        all_routes.sort(key=lambda r: route_bags(r))
+        smallest = all_routes[0]
+
+        if route_bags(smallest) < min_driver_bags:
+            temp = [list(r) for r in all_routes[1:]]
             all_absorbed = True
             for node in smallest:
                 b_idx, b_detour = None, float("inf")
+                n_city = {city_list[node - 1]}
                 for idx, t_r in enumerate(temp):
-                    if route_bags(t_r) + demand_list[node - 1] > max_capacity:
+                    t_cities = route_cities(t_r)
+                    is_t_distant = bool(t_cities & DISTANT_CITIES)
+                    cap = max_distant_bags if (is_t_distant and n_city not in DISTANT_CITIES) else max_local_bags
+                    if route_bags(t_r) + demand_list[node - 1] > cap:
                         continue
-                    if not are_cities_compatible(route_cities(t_r), {city_list[node - 1]}):
+                    if not are_cities_compatible_v2(t_cities, n_city, allow_fuj_rak_combo=True):
                         continue
-                    _, o_km = optimize_route_order(t_r, dist_matrix)
-                    _, n_km = optimize_route_order(t_r + [node], dist_matrix)
+                    _, o_km = optimize_route_order(t_r, dist_matrix, city_list)
+                    _, n_km = optimize_route_order(t_r + [node], dist_matrix, city_list)
                     detour = n_km - o_km
                     if n_km <= max_route_km and detour < b_detour:
                         b_detour, b_idx = detour, idx
@@ -490,38 +791,36 @@ def build_balanced_morning_routes(dist_matrix, valid_stops, target_drivers, max_
                     all_absorbed = False
                     break
             if all_absorbed:
-                routes = [optimize_route_order(r, dist_matrix)[0] for r in temp]
+                all_routes = [optimize_route_order(r, dist_matrix, city_list)[0] for r in temp]
                 changed = True
 
-    # Stage 4: Highway backfill / relief
-    while True:
-        best_t, best_d = None, float("inf")
-        for l_idx, l_r in enumerate(routes):
-            if route_bags(l_r) >= max_capacity - 1:
-                continue
-            _, l_km = optimize_route_order(l_r, dist_matrix)
-            for h_idx, h_r in enumerate(routes):
-                if l_idx == h_idx or route_bags(h_r) - route_bags(l_r) < 3 or route_bags(h_r) <= min_capacity:
-                    continue
-                for node in h_r:
-                    nc = city_list[node - 1]
-                    if (nc in DISTANT_CITIES and nc not in route_cities(l_r)) or route_bags(l_r) + demand_list[node - 1] > max_capacity:
-                        continue
-                    if not are_cities_compatible(route_cities(l_r), {nc}):
-                        continue
-                    _, n_km = optimize_route_order(l_r + [node], dist_matrix)
-                    detour = n_km - l_km
-                    if n_km <= max_route_km and detour <= 22.0 and detour < best_d:
-                        best_d, best_t = detour, (h_idx, l_idx, node)
-        if best_t:
-            routes[best_t[0]].remove(best_t[2])
-            routes[best_t[1]].append(best_t[2])
-            routes[best_t[0]], _ = optimize_route_order(routes[best_t[0]], dist_matrix)
-            routes[best_t[1]], _ = optimize_route_order(routes[best_t[1]], dist_matrix)
-        else:
-            break
+    return [optimize_route_order(r, dist_matrix, city_list)[0] for r in all_routes]
 
-    return [optimize_route_order(r, dist_matrix)[0] for r in routes]
+
+def get_primary_route_label(route, valid_stops):
+    primary_distant = []
+    return_cities = []
+    for node in route:
+        c = valid_stops[node - 1]["city"]
+        if c in DISTANT_CITIES:
+            if c not in primary_distant:
+                primary_distant.append(c)
+        else:
+            if c not in return_cities:
+                return_cities.append(c)
+
+    if primary_distant:
+        p_str = " + ".join(primary_distant)
+        if return_cities:
+            return f"{p_str} ➔ Return: {', '.join(return_cities)}"
+        return p_str
+
+    city_bags = {}
+    for node in route:
+        c = valid_stops[node - 1]["city"]
+        city_bags[c] = city_bags.get(c, 0) + valid_stops[node - 1]["bags"]
+    sorted_c = sorted(city_bags.keys(), key=lambda c: city_bags[c], reverse=True)
+    return " / ".join(sorted_c)
 
 
 def assign_drivers_with_rotation(routes, valid_stops, dist_matrix, far_yesterday_names, resting_today_names):
@@ -548,9 +847,10 @@ def assign_drivers_with_rotation(routes, valid_stops, dist_matrix, far_yesterday
             if len(active_drivers) < num_routes and d not in active_drivers:
                 active_drivers.append(d)
 
+    city_list = [s["city"] for s in valid_stops]
     route_meta = []
     for r_idx, r in enumerate(routes):
-        _, one_way_km = optimize_route_order(r, dist_matrix)
+        _, one_way_km = optimize_route_order(r, dist_matrix, city_list)
         r_cities = {valid_stops[n - 1]["city"] for n in r}
         is_distant = bool(r_cities & DISTANT_CITIES)
         max_wh = max(valid_stops[n - 1]["wh_road_km"] for n in r)
@@ -587,18 +887,26 @@ def resequence_driver_stops(driver_rows, wh_lat, wh_lon):
     coords = [(wh_lat, wh_lon)] + [
         (float(r["Resolved_Lat"]), float(r["Resolved_Lon"])) for r in driver_rows
     ]
+    stop_cities = [r.get("City_Area", "") for r in driver_rows]
     dist_mat = build_road_distance_matrix(coords)
-    ordered_nodes, one_way_km = optimize_route_order(list(range(1, len(driver_rows) + 1)), dist_mat)
+    ordered_nodes, one_way_km = optimize_route_order(
+        list(range(1, len(driver_rows) + 1)), dist_mat, stop_cities
+    )
 
     reordered_rows = []
     prev_node = 0
     total_bags = sum(int(float(r.get("Bags", 1) or 1)) for r in driver_rows)
+    has_distant = any(c in DISTANT_CITIES for c in stop_cities)
 
     for seq_num, node in enumerate(ordered_nodes, start=1):
         row = dict(driver_rows[node - 1])
         leg_km = dist_mat[prev_node][node]
         prev_node = node
+        c_area = row.get("City_Area", "")
+        leg_type = "Primary City" if (not has_distant or c_area in DISTANT_CITIES) else "Return-Leg Cluster"
+
         row["Stop_Sequence"] = seq_num
+        row["Stop_Phase"] = leg_type
         row["Leg_Distance_KM"] = round(leg_km, 2)
         row["Route_Total_Bags"] = total_bags
         row["Route_OneWay_KM"] = round(one_way_km, 2)
@@ -613,11 +921,6 @@ def resequence_driver_stops(driver_rows, wh_lat, wh_lon):
 
 
 def build_google_maps_nav_links(wh_lat, wh_lon, stops):
-    """
-    Build multi-stop Google Maps navigation URLs.
-    Splits routes > 9 stops into Part 1 (Stops 1-9), Part 2 (Stops 10-18), etc.,
-    so Google Maps never truncates stops beyond its 10-waypoint URL limit.
-    """
     if not stops:
         return []
 
@@ -641,29 +944,29 @@ def build_google_maps_nav_links(wh_lat, wh_lon, stops):
         part_num = (start_i // chunk_size) + 1
         s_first = chunk[0]["Stop_Sequence"]
         s_last = chunk[-1]["Stop_Sequence"]
-        label = "ðŸ—ºï¸ Open Route in Google Maps â†—" if len(stops) <= chunk_size else f"ðŸ—ºï¸ Part {part_num} (Stops #{s_first}â€“#{s_last}) â†—"
+        label = "🗺️ Open Route in Google Maps ↗" if len(stops) <= chunk_size else f"🗺️ Part {part_num} (Stops #{s_first}–#{s_last}) ↗"
         links.append((label, "https://www.google.com/maps/dir/" + "/".join(pts)))
 
     return links
 
 
 # ==========================================
-# 4. SIDEBAR SETTINGS & DRIVER MAP FILTER
+# 6. SIDEBAR SETTINGS & DRIVER MAP FILTER
 # ==========================================
 db_stats = get_recent_driver_stats()
 default_far_yesterday = [d for d, st_info in db_stats.items() if st_info["went_far_yesterday"]]
 
-st.sidebar.title("ðŸšš Dispatch & Rotation")
+st.sidebar.title("🧪 V2 LAB — Dispatch & Rotation")
 
 selected_driver_filter = st.sidebar.selectbox(
-    "ðŸ” View Driver on Map",
+    "🔍 View Driver on Map",
     options=["Show All Drivers"] + FLEET_DRIVERS,
     index=0
 )
 
 uploaded_file = st.sidebar.file_uploader("1. Upload 'lion_delivery_all_bags.csv'", type=["csv"])
 
-st.sidebar.markdown("### ðŸ‘¥ Driver Rotation Rules")
+st.sidebar.markdown("### 👥 Driver Rotation Rules")
 far_yesterday_input = st.sidebar.multiselect(
     "Went Far Yesterday (Al Ain / Abu Dhabi / Fujairah / RAK):",
     options=FLEET_DRIVERS,
@@ -675,15 +978,16 @@ resting_today_input = st.sidebar.multiselect(
     default=[]
 )
 
-st.sidebar.markdown("### âš™ï¸ Route Constraints")
+st.sidebar.markdown("### ⚙️ V2 Route & Backfill Rules")
 target_drivers_input = st.sidebar.slider("Target Morning Drivers", min_value=3, max_value=7, value=5)
-max_bags_input = st.sidebar.slider("Max Bags per Driver", min_value=15, max_value=25, value=21)
-min_bags_input = st.sidebar.slider("Min Bags per Driver (No tiny runs)", min_value=3, max_value=10, value=6)
-max_dist_input = st.sidebar.number_input("Max Warehouse Road Distance (KM)", value=180.0, step=10.0)
+max_bags_local_input = st.sidebar.slider("Max Bags (Local Driver - DXB/SHJ)", min_value=15, max_value=25, value=21)
+max_bags_distant_input = st.sidebar.slider("Target Cap (Distant Driver w/ Backfill)", min_value=14, max_value=19, value=16)
+min_bags_input = st.sidebar.slider("Min Bags per Driver (Combine / Backfill)", min_value=6, max_value=12, value=10)
+max_dist_input = st.sidebar.number_input("Max Warehouse Road Distance (KM)", value=240.0, step=10.0)
 
 
 # ==========================================
-# 5. MAIN APPLICATION PIPELINE
+# 7. MAIN APPLICATION PIPELINE
 # ==========================================
 wh_lat, wh_lon = resolve_google_maps_url(WAREHOUSE_URL)
 if not wh_lat:
@@ -691,8 +995,8 @@ if not wh_lat:
     st.stop()
 
 if uploaded_file is None:
-    st.info("ðŸ‘‹ Upload today's scraped `lion_delivery_all_bags.csv` in the sidebar to generate instant routes.")
-    with st.expander("ðŸ“Š View 7-Day Driver Rotation History"):
+    st.info("👋 Upload today's scraped `lion_delivery_all_bags.csv` in the sidebar to test the V2 Primary-First + Return Micro-Cluster engine.")
+    with st.expander("📊 View 7-Day Driver Rotation History"):
         hist_rows = [
             {
                 "Driver": d,
@@ -713,26 +1017,26 @@ raw_rows = list(reader)
 fieldnames = reader.fieldnames or []
 bag_col = fieldnames[0] if fieldnames else "Bag_Number"
 
-# Auto-detect if file or any sidebar parameter changed
 current_config_sig = (
     uploaded_file.name,
     len(raw_bytes),
     target_drivers_input,
-    max_bags_input,
+    max_bags_local_input,
+    max_bags_distant_input,
     min_bags_input,
     max_dist_input,
     tuple(sorted(far_yesterday_input)),
     tuple(sorted(resting_today_input))
 )
 
-force_rerun = st.sidebar.button("ðŸ”„ Re-Run Fast Optimization")
+force_rerun = st.sidebar.button("🔄 Re-Run V2 Optimization")
 
 if (
     "dispatch_data" not in st.session_state
     or st.session_state.get("config_sig") != current_config_sig
     or force_rerun
 ):
-    with st.spinner("Processing coordinates and assigning drivers..."):
+    with st.spinner("Running V2 Primary-First Sequencing & Micro-Cluster Backfill..."):
         resolved, unresolvable, oman_stops = [], [], []
         url_col = next((c for c in fieldnames if any(k in c.lower() for k in ["url", "link", "map", "location"])), None)
 
@@ -759,7 +1063,7 @@ if (
                 unresolvable.append(row)
 
         if not resolved:
-            st.error("Could not resolve valid UAE coordinates from the uploaded CSV. Check your Map_URL column.")
+            st.error("Could not resolve valid UAE coordinates from the uploaded CSV.")
             st.stop()
 
         all_coords = [(wh_lat, wh_lon)] + [(s["lat"], s["lon"]) for s in resolved]
@@ -775,13 +1079,16 @@ if (
 
         deliv_coords = [(wh_lat, wh_lon)] + [(s["lat"], s["lon"]) for s in valid_stops]
         dist_mat = build_road_distance_matrix(deliv_coords)
+        valid_cities = [s["city"] for s in valid_stops]
 
-        routes = build_balanced_morning_routes(
-            dist_mat, valid_stops,
+        routes = build_v2_morning_routes(
+            dist_mat,
+            valid_stops,
             target_drivers=target_drivers_input,
-            max_capacity=max_bags_input,
-            min_capacity=min_bags_input,
-            max_route_km=480.0
+            max_local_bags=max_bags_local_input,
+            max_distant_bags=max_bags_distant_input,
+            min_driver_bags=min_bags_input,
+            max_route_km=600.0
         )
 
         driver_route_pairs = assign_drivers_with_rotation(
@@ -792,10 +1099,11 @@ if (
 
         final_rows = []
         for d_name, route in driver_route_pairs:
-            ordered, total_km = optimize_route_order(route, dist_mat)
+            ordered, total_km = optimize_route_order(route, dist_mat, valid_cities)
             total_bags = sum(valid_stops[n - 1]["bags"] for n in ordered)
             corridor_label = get_primary_route_label(ordered, valid_stops)
             driver_display = f"{d_name} ({corridor_label})"
+            has_distant_in_route = any(valid_stops[n - 1]["city"] in DISTANT_CITIES for n in ordered)
 
             route_temp_rows = []
             prev = 0
@@ -803,11 +1111,17 @@ if (
                 stop = valid_stops[node - 1]
                 leg_km = dist_mat[prev][node]
                 prev = node
+                phase_label = (
+                    "Primary City"
+                    if (not has_distant_in_route or stop["city"] in DISTANT_CITIES)
+                    else "Return-Leg Cluster"
+                )
                 item = dict(stop["row_data"])
                 item.update({
                     "Assigned_Driver": d_name,
                     "Driver_ID": driver_display,
                     "Stop_Sequence": seq,
+                    "Stop_Phase": phase_label,
                     "City_Area": stop["city"],
                     "Warehouse_Road_KM": round(stop["wh_road_km"], 2),
                     "Leg_Distance_KM": round(leg_km, 2),
@@ -829,8 +1143,9 @@ if (
             item = dict(fs["row_data"])
             item.update({
                 "Assigned_Driver": "NOT GOING",
-                "Driver_ID": "NOT GOING - VERY FAR (>180KM)",
+                "Driver_ID": f"NOT GOING - VERY FAR (>{int(max_dist_input)}KM)",
                 "Stop_Sequence": "",
+                "Stop_Phase": "Excluded",
                 "City_Area": fs["city"],
                 "Warehouse_Road_KM": round(fs["wh_road_km"], 2),
                 "Leg_Distance_KM": "",
@@ -840,7 +1155,7 @@ if (
                 "Est_Shift_Hours": "",
                 "Resolved_Lat": round(fs["lat"], 6),
                 "Resolved_Lon": round(fs["lon"], 6),
-                "Dispatch_Status": "UNABLE_TO_DELIVER_OVER_180KM"
+                "Dispatch_Status": "UNABLE_TO_DELIVER_TOO_FAR"
             })
             final_rows.append(item)
 
@@ -850,6 +1165,7 @@ if (
                 "Assigned_Driver": "NOT GOING",
                 "Driver_ID": "NOT GOING - OUTSIDE UAE (OMAN)",
                 "Stop_Sequence": "",
+                "Stop_Phase": "Excluded",
                 "City_Area": "Oman Territory",
                 "Warehouse_Road_KM": "",
                 "Leg_Distance_KM": "",
@@ -887,17 +1203,17 @@ kpi1, kpi2, kpi3, kpi4 = st.columns(4)
 kpi1.metric("Active Drivers", f"{len(active_driver_ids)} / 7")
 kpi2.metric("Total Bags Assigned", total_bags_assigned)
 kpi3.metric("Resting Drivers", ", ".join(resting_drivers_today) if resting_drivers_today else "None")
-kpi4.metric("Excluded Stops", len(excluded_bags))
+kpi4.metric(f"Excluded (>{int(max_dist_input)}km / Oman)", len(excluded_bags))
 
 # ==========================================
-# 6. MANUAL CONTROLS
+# 8. MANUAL CONTROLS
 # ==========================================
-ctrl_tab1, ctrl_tab2 = st.tabs(["ðŸ”„ Move Single Bag", "ðŸ”€ Swap Drivers Between Routes"])
+ctrl_tab1, ctrl_tab2 = st.tabs(["🔄 Move Single Bag", "🔀 Swap Drivers Between Routes"])
 
 with ctrl_tab1:
     col_re1, col_re2, col_re3 = st.columns([3, 2, 1.5])
     bag_options = [
-        (f"{r.get(bag_col, '')} | {r.get('Driver_ID', '')} (Stop #{r.get('Stop_Sequence', '-')})", idx)
+        (f"{r.get(bag_col, '')} | {r.get('Driver_ID', '')} (Stop #{r.get('Stop_Sequence', '-')} • {r.get('City_Area', '')})", idx)
         for idx, r in enumerate(master_rows) if r.get("Resolved_Lat")
     ]
     selected_bag_idx = col_re1.selectbox(
@@ -907,7 +1223,7 @@ with ctrl_tab1:
     )
     target_driver_choice = col_re2.selectbox(
         "Move To Driver",
-        options=active_driver_ids + ["NOT GOING - VERY FAR (>180KM)", "NOT GOING - OUTSIDE UAE (OMAN)"]
+        options=active_driver_ids + [f"NOT GOING - VERY FAR (>{int(max_dist_input)}KM)", "NOT GOING - OUTSIDE UAE (OMAN)"]
     )
     if col_re3.button("Move Bag & Re-Sequence"):
         old_drv = master_rows[selected_bag_idx]["Driver_ID"]
@@ -931,6 +1247,7 @@ with ctrl_tab1:
                     for r in master_rows:
                         if r.get("Driver_ID") == affected_drv:
                             r["Stop_Sequence"] = ""
+                            r["Stop_Phase"] = "Excluded"
                             r["Leg_Distance_KM"] = ""
                             r["Route_Total_Bags"] = ""
                             r["Route_OneWay_KM"] = ""
@@ -944,7 +1261,7 @@ with ctrl_tab2:
     sc1, sc2, sc3 = st.columns([2, 2, 1.5])
     swap_driver_a = sc1.selectbox("Driver 1", options=FLEET_DRIVERS, index=0)
     swap_driver_b = sc2.selectbox("Driver 2", options=FLEET_DRIVERS, index=1)
-    if sc3.button("ðŸ”€ Swap Entire Route"):
+    if sc3.button("🔀 Swap Entire Route"):
         if swap_driver_a != swap_driver_b:
             for r in master_rows:
                 curr_d = r.get("Assigned_Driver", "")
@@ -961,12 +1278,11 @@ with ctrl_tab2:
             st.rerun()
 
 # ==========================================
-# 7. LARGE MAP RENDER (FEATURE GROUPS + LEGEND + TILES)
+# 9. LARGE MAP RENDER (PRIMARY FIRST + RETURN CLUSTER)
 # ==========================================
 m = folium.Map(location=[wh_lat, wh_lon], zoom_start=9, tiles=None, control_scale=True)
 Fullscreen(position="topleft", force_separate_button=True).add_to(m)
 
-# Base Map Switcher: Google Maps, Esri Street Map, and Google Satellite
 folium.TileLayer(
     "https://mt1.google.com/vt/lyrs=m&x={x}&y={y}&z={z}",
     attr="Google Maps",
@@ -1018,7 +1334,6 @@ for d_idx, d_name in enumerate(active_driver_ids):
     nav_links = build_google_maps_nav_links(wh_lat, wh_lon, d_stops)
     primary_nav_url = nav_links[0][1] if nav_links else "#"
 
-    # FeatureGroup lets you toggle individual drivers on/off in the top-right layer box
     fg = folium.FeatureGroup(name=f"{d_name} ({total_bags} bags | {total_km} km)", show=True)
 
     waypoints = [(wh_lat, wh_lon)] + [(float(s["Resolved_Lat"]), float(s["Resolved_Lon"])) for s in d_stops]
@@ -1034,34 +1349,37 @@ for d_idx, d_name in enumerate(active_driver_ids):
         dup_count = seen_marker_coords.get(coord_key, 0)
         seen_marker_coords[coord_key] = dup_count + 1
 
-        # Offset identical pins by ~15m visually so stacked bag numbers don't hide each other
         disp_lat = raw_lat + (dup_count * 0.00014)
         disp_lon = raw_lon + (dup_count * 0.00014)
+
+        phase_str = s.get("Stop_Phase", "Primary City")
+        border_style = "2px dashed #ffeb3b" if phase_str == "Return-Leg Cluster" else "2px solid #fff"
 
         pin_url = f"https://www.google.com/maps?q={raw_lat},{raw_lon}"
         badge_html = (
             f'<div style="background:{color}; color:#fff; border-radius:50%; '
             f'width:24px; height:24px; text-align:center; font-weight:bold; '
-            f'font-size:11px; line-height:24px; border:2px solid #fff; '
+            f'font-size:11px; line-height:24px; border:{border_style}; '
             f'box-shadow:0 2px 4px rgba(0,0,0,0.4);">'
             f'{s["Stop_Sequence"]}</div>'
         )
         badge = folium.DivIcon(html=badge_html, icon_size=(24, 24), icon_anchor=(12, 12))
         popup_html = (
-            f'<div style="font-family:Arial,sans-serif; font-size:12px; min-width:190px;">'
-            f'<b>{d_name} â€” Stop #{s["Stop_Sequence"]}</b><br>'
+            f'<div style="font-family:Arial,sans-serif; font-size:12px; min-width:200px;">'
+            f'<b>{d_name} — Stop #{s["Stop_Sequence"]}</b><br>'
+            f'<b>Phase:</b> {phase_str}<br>'
             f'<b>Bag:</b> {s.get(bag_col, "")}<br>'
-            f'<b>City:</b> {s.get("City_Area", "")}<br>'
+            f'<b>Area:</b> {s.get("City_Area", "")}<br>'
             f'<b>From WH:</b> {s.get("Warehouse_Road_KM", "")} km (+{s.get("Leg_Distance_KM", "")} km leg)<br>'
             f'<b>Est. Finish:</b> {s.get("Est_Finish_Time", "")}<br>'
-            f'<a href="{pin_url}" target="_blank" style="color:#1a73e8; font-weight:bold;">Open Pin â†—</a> | '
-            f'<a href="{primary_nav_url}" target="_blank" style="color:#0b8043; font-weight:bold;">Driver Route â†—</a>'
+            f'<a href="{pin_url}" target="_blank" style="color:#1a73e8; font-weight:bold;">Open Pin ↗</a> | '
+            f'<a href="{primary_nav_url}" target="_blank" style="color:#0b8043; font-weight:bold;">Driver Route ↗</a>'
             f'</div>'
         )
         folium.Marker(
             location=[disp_lat, disp_lon],
             popup=folium.Popup(popup_html, max_width=280),
-            tooltip=f"{s.get(bag_col, '')} â€¢ Stop #{s['Stop_Sequence']} â€¢ {d_name}",
+            tooltip=f"{s.get(bag_col, '')} • Stop #{s['Stop_Sequence']} ({phase_str}) • {s.get('City_Area', '')}",
             icon=badge
         ).add_to(fg)
 
@@ -1071,29 +1389,28 @@ for d_idx, d_name in enumerate(active_driver_ids):
         f'<span style="display:inline-flex; align-items:center; margin-right:14px; margin-bottom:4px; white-space:nowrap;">'
         f'<span style="background:{color}; width:11px; height:11px; border-radius:50%; display:inline-block; margin-right:5px; border:1px solid #fff;"></span>'
         f'<b>{d_name}:</b>&nbsp;{total_bags} bags ({total_km} km)&nbsp;'
-        f'<a href="{primary_nav_url}" target="_blank" style="color:#1a73e8; text-decoration:none; font-weight:bold;">[ðŸ—ºï¸ Nav]</a>'
+        f'<a href="{primary_nav_url}" target="_blank" style="color:#1a73e8; text-decoration:none; font-weight:bold;">[🗺️ Nav]</a>'
         f'</span>'
     )
 
-# Plot excluded stops in their own toggleable layer when viewing all drivers
 if selected_driver_filter == "Show All Drivers" and excluded_bags:
-    ex_fg = folium.FeatureGroup(name=f"ðŸš« Excluded Stops ({len(excluded_bags)})", show=True)
+    ex_fg = folium.FeatureGroup(name=f"🚫 Excluded Stops ({len(excluded_bags)})", show=True)
     for ex_stop in excluded_bags:
         lat, lon = float(ex_stop["Resolved_Lat"]), float(ex_stop["Resolved_Lon"])
         route_coords_for_bounds.append((lat, lon))
         is_om = "OMAN" in ex_stop["Driver_ID"]
         icon_color = "#e65100" if is_om else "#212121"
-        label = "OUTSIDE UAE (OMAN)" if is_om else f"TOO FAR ({ex_stop.get('Warehouse_Road_KM', '>180')} km)"
+        label = "OUTSIDE UAE (OMAN)" if is_om else f"TOO FAR ({ex_stop.get('Warehouse_Road_KM', '>240')} km)"
         warn_html = (
             f'<div style="background:{icon_color}; color:#fff; border-radius:50%; '
             f'width:24px; height:24px; text-align:center; font-weight:bold; '
-            f'font-size:11px; line-height:24px; border:2px solid #ff5252;">âœ•</div>'
+            f'font-size:11px; line-height:24px; border:2px solid #ff5252;">✕</div>'
         )
         warn_badge = folium.DivIcon(html=warn_html, icon_size=(24, 24), icon_anchor=(12, 12))
         folium.Marker(
             location=[lat, lon],
-            popup=f"<b>ðŸš« {label}</b><br>Bag: {ex_stop.get(bag_col, '')}",
-            tooltip=f"ðŸš« {label}: {ex_stop.get(bag_col, '')}",
+            popup=f"<b>🚫 {label}</b><br>Bag: {ex_stop.get(bag_col, '')}",
+            tooltip=f"🚫 {label}: {ex_stop.get(bag_col, '')}",
             icon=warn_badge
         ).add_to(ex_fg)
     ex_fg.add_to(m)
@@ -1103,29 +1420,26 @@ if len(route_coords_for_bounds) > 1:
     lons = [c[1] for c in route_coords_for_bounds]
     m.fit_bounds([[min(lats), min(lons)], [max(lats), max(lons)]], padding=(35, 35))
 
-# Floating bottom summary bar (matches your original screenshot)
 if legend_chips:
     bottom_bar_html = (
         '<div style="position:fixed; bottom:10px; left:10px; right:10px; z-index:9999; '
         'background:rgba(255,255,255,0.94); padding:7px 12px; border-radius:8px; '
         'box-shadow:0 2px 8px rgba(0,0,0,0.25); font-family:Arial,sans-serif; '
         'font-size:12px; display:flex; flex-wrap:wrap; align-items:center;">'
-        '<span style="margin-right:14px; font-weight:bold;">ðŸ  Ajman WH</span>'
+        '<span style="margin-right:14px; font-weight:bold;">🏠 Ajman WH</span>'
         + "".join(legend_chips) +
         '</div>'
     )
     m.get_root().html.add_child(folium.Element(bottom_bar_html))
 
 folium.LayerControl(collapsed=False, position="topright").add_to(m)
-
-# returned_objects=[] prevents Streamlit from reloading the page when panning/zooming
 st_folium(m, width="100%", height=750, returned_objects=[])
 
 # ==========================================
-# 8. EXPORT & WHATSAPP CARDS
+# 10. EXPORT & WHATSAPP CARDS (PRIMARY VS RETURN BREAKDOWN)
 # ==========================================
 out_fields = list(fieldnames) + [
-    "Assigned_Driver", "Driver_ID", "Stop_Sequence", "City_Area",
+    "Assigned_Driver", "Driver_ID", "Stop_Sequence", "Stop_Phase", "City_Area",
     "Warehouse_Road_KM", "Leg_Distance_KM", "Route_Total_Bags",
     "Route_OneWay_KM", "Est_Finish_Time", "Est_Shift_Hours",
     "Resolved_Lat", "Resolved_Lon", "Dispatch_Status"
@@ -1138,17 +1452,17 @@ writer.writerows(master_rows)
 
 btn_col1, btn_col2 = st.columns(2)
 btn_col1.download_button(
-    label="ðŸ“¥ Download Today's Dispatch Plan (CSV)",
+    label="📥 Download Today's Dispatch Plan (CSV)",
     data=csv_buffer.getvalue().encode("utf-8-sig"),
-    file_name=f"dispatch_plan_{date.today().isoformat()}.csv",
+    file_name=f"dispatch_plan_v2_{date.today().isoformat()}.csv",
     mime="text/csv"
 )
 
-if btn_col2.button("ðŸ’¾ Confirm & Log Today's Routes to Rotation History"):
+if btn_col2.button("💾 Confirm & Log Today's Routes to Rotation History"):
     log_dispatch_to_db(master_rows)
-    st.success("âœ… Saved today's driver assignments to rotation history!")
+    st.success("✅ Saved today's driver assignments to rotation history!")
 
-st.subheader("ðŸ“² Driver Lists & Google Maps Navigation Links")
+st.subheader("📲 Driver Lists & Google Maps Navigation Links (Primary First ➔ Return Cluster)")
 for d_name in active_driver_ids:
     if selected_driver_filter != "Show All Drivers" and selected_driver_filter.lower() not in d_name.lower():
         continue
@@ -1161,10 +1475,19 @@ for d_name in active_driver_ids:
     one_way_km = d_stops[0].get("Route_OneWay_KM", "0")
     est_fin = d_stops[0].get("Est_Finish_Time", "")
     est_hrs = d_stops[0].get("Est_Shift_Hours", "")
-    bag_list_str = ", ".join(f"#{s['Stop_Sequence']}: {s.get(bag_col, '')}" for s in d_stops)
 
-    st.markdown(
-        f"**{d_name}** â€” **{len(d_stops)} bags** | **{one_way_km} km** | "
-        f"â±ï¸ Est. Finish: **{est_fin}** ({est_hrs} hrs) â€” {links_md}\n"
-        f"> *Stop Sequence:* `{bag_list_str}`"
+    primary_stops = [s for s in d_stops if s.get("Stop_Phase") == "Primary City"]
+    return_stops = [s for s in d_stops if s.get("Stop_Phase") == "Return-Leg Cluster"]
+
+    primary_str = ", ".join(f"#{s['Stop_Sequence']}: {s.get(bag_col, '')} ({s.get('City_Area', '')})" for s in primary_stops)
+    return_str = ", ".join(f"#{s['Stop_Sequence']}: {s.get(bag_col, '')} ({s.get('City_Area', '')})" for s in return_stops)
+
+    card_md = (
+        f"**{d_name}** — **{len(d_stops)} bags** | **{one_way_km} km** | "
+        f"⏱️ Est. Finish: **{est_fin}** ({est_hrs} hrs) — {links_md}\n"
+        f"> **1️⃣ Primary Stops ({len(primary_stops)}):** `{primary_str}`"
     )
+    if return_stops:
+        card_md += f"\n> **2️⃣ Return-Leg Cluster ({len(return_stops)}):** `{return_str}`"
+
+    st.markdown(card_md)
