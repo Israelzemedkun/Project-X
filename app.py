@@ -146,72 +146,46 @@ def predict_driver_finish_time(stops, total_one_way_km):
 # 2. BORDER CONTROL & GRANULAR UAE CITY DETECTION
 # ==========================================
 def is_in_oman(lat, lon):
-    # 1. Madha Enclave (Oman enclave surrounded by Fujairah/Sharjah)
     if 25.240 <= lat <= 25.345 and 56.270 <= lon <= 56.380:
         return True
-    # 2. Musandam & Dibba Al-Baya (North of UAE)
     if lat >= 26.04:
         return True
     if lat >= 25.620 and lon >= 56.275:
         return True
-    # 3. Al Buraimi & Mahdah (East of Al Ain border)
     if 24.15 <= lat <= 24.45 and lon >= 55.775:
         return True
-    # 4. East of Hatta / Al Wajajah border
     if 24.78 <= lat <= 24.88 and lon >= 56.140:
         return True
-    # 5. General South/East of UAE border fence
     if lat < 24.0 and lon >= 55.80:
         return True
     return False
 
 
 def identify_uae_city(lat, lon):
-    """
-    Granular UAE City & Corridor classification:
-      - 'Abu Dhabi': Strictly includes all western sectors (lon < 54.95).
-      - 'Fujairah / East Coast': Includes Hatta / Masfout (lon >= 55.95).
-      - 'Al Ain': Includes Al Ain city, deep southern approach (< 24.35), 
-        and the E66/E55 Al Shuwaib / Al Faqa corridor.
-    """
-    # 1. Strictly Abu Dhabi for all western coordinates (lon < 54.95)
     if lon < 54.95:
         return "Abu Dhabi"
-
-    # 2. Fujairah, East Coast & Hatta / Masfout Mountain Corridor
     if lon >= 55.95 and lat >= 24.70:
         return "Fujairah / East Coast"
-
-    # 3. Al Ain City + Deep Southern Approach (< 24.35) + E66/E55 Highway Corridor
     if lat < 24.35:
         return "Al Ain"
     if lat < 24.82 and 55.35 <= lon < 55.95:
         return "Al Ain"
     if 24.82 <= lat < 25.02 and 55.55 <= lon < 55.95:
         return "Al Ain"
-
-    # 4. Ras Al Khaimah
+    if lon < 54.95 or (lat < 24.80 and lon < 55.35):
+        return "Abu Dhabi"
     if lat >= 25.62 and 55.70 <= lon < 56.15:
         return "Ras Al Khaimah"
-
-    # 5. Umm Al Quwain
     if 25.48 <= lat < 25.62 and 55.50 <= lon < 55.85:
         return "Umm Al Quwain"
-
-    # 6. Ajman
     if 25.365 <= lat < 25.48 and 55.40 <= lon <= 55.63:
         return "Ajman"
-
-    # 7. Sharjah (Split into Near-Dubai vs North/Inland)
     if 25.25 <= lat < 25.48 and 55.34 <= lon < 55.95:
         if lat < 25.325 and lon < 55.475:
             return "Sharjah (Near Dubai)"
         return "Sharjah (North / Inland)"
-
-    # 8. Dubai
     if 24.80 <= lat < 25.32 and 54.95 <= lon <= 55.65:
         return "Dubai"
-
     return "Sharjah (North / Inland)"
 
 
@@ -225,7 +199,7 @@ def resolve_google_maps_url(url):
 
     unquoted = urllib.parse.unquote(str(url).strip())
     patterns = [
-        r"/dir/[^/]+/(-?\d+\.\d+)\s*,\s*[+]?(-?\d+\.\d+)",  # /maps/dir/origin/destination
+        r"/dir/[^/]+/(-?\d+\.\d+)\s*,\s*[+]?(-?\d+\.\d+)",
         r"!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)",
         r"[?&]q=(-?\d+\.\d+)\s*,\s*[+]?(-?\d+\.\d+)",
         r"/search/(-?\d+\.\d+)\s*,\s*[+]?(-?\d+\.\d+)",
@@ -533,7 +507,6 @@ def build_v2_morning_routes(
     def route_cities(r):
         return set(city_list[n - 1] for n in r)
 
-    # Step 1: Separate Distant Poles vs Local Stops
     distant_buckets = {dc: [] for dc in DISTANT_CITIES}
     local_pool = []
 
@@ -565,7 +538,6 @@ def build_v2_morning_routes(
             if chunk:
                 distant_routes.append(chunk)
 
-    # Step 2: Conditional Fujairah + Ras Al Khaimah Combination (<10 bags rule)
     fuj_routes = [r for r in distant_routes if route_cities(r) == {"Fujairah / East Coast"}]
     rak_routes = [r for r in distant_routes if route_cities(r) == {"Ras Al Khaimah"}]
 
@@ -578,7 +550,6 @@ def build_v2_morning_routes(
             combined_fr, _ = optimize_route_order(f_r + r_r, dist_matrix, city_list)
             distant_routes.append(combined_fr)
 
-    # Step 3: Return-Leg Micro-Cluster Backfill onto Distant Drivers
     remaining_local_driver_slots = max(1, target_drivers - len(distant_routes))
 
     def distant_backfill_priority(r):
@@ -664,7 +635,6 @@ def build_v2_morning_routes(
                 d_route.append(n)
                 local_pool.remove(n)
 
-    # Step 4: Cluster Remaining Local Stops (Dubai / Sharjah / Ajman)
     local_routes = [[n] for n in local_pool]
 
     for i_idx in range(len(local_pool)):
@@ -720,7 +690,6 @@ def build_v2_morning_routes(
 
     all_routes = distant_routes + local_routes
 
-    # Step 5: Absorb any leftover small routes (< min_driver_bags)
     changed = True
     while changed and len(all_routes) > 1:
         changed = False
@@ -1199,7 +1168,7 @@ with ctrl_tab1:
 
             for affected_drv in [old_drv, target_driver_choice]:
                 if "NOT GOING" not in affected_drv:
-                    d_indices = [i for i, r in enumerate(master_rows) if r.get("Driver_ID") == affected_drv]
+                    d_indices = [i for i, r in enumerate(master_rows) if r.get("Driver_ID"] == affected_drv]
                     d_rows = [master_rows[i] for i in d_indices]
                     updated_rows = resequence_driver_stops(d_rows, wh_lat, wh_lon)
                     for i, updated_row in zip(d_indices, updated_rows):
@@ -1239,7 +1208,7 @@ with ctrl_tab2:
             st.rerun()
 
 # ==========================================
-# 9. LARGE MAP RENDER (PRIMARY FIRST + RETURN CLUSTER)
+# 9. LARGE MAP RENDER (COLLAPSIBLE LAYER CONTROL)
 # ==========================================
 m = folium.Map(location=[wh_lat, wh_lon], zoom_start=9, tiles=None, control_scale=True)
 Fullscreen(position="topleft", force_separate_button=True).add_to(m)
@@ -1393,11 +1362,12 @@ if legend_chips:
     )
     m.get_root().html.add_child(folium.Element(bottom_bar_html))
 
-folium.LayerControl(collapsed=False, position="topright").add_to(m)
+# Set collapsed=True so the driver checkboxes and map styles fold into a small icon button
+folium.LayerControl(collapsed=True, position="topright").add_to(m)
 st_folium(m, width="100%", height=750, returned_objects=[])
 
 # ==========================================
-# 10. EXPORT & WHATSAPP CARDS (PRIMARY VS RETURN BREAKDOWN)
+# 10. EXPORT & WHATSAPP CARDS
 # ==========================================
 out_fields = list(fieldnames) + [
     "Assigned_Driver", "Driver_ID", "Stop_Sequence", "Stop_Phase", "City_Area",
