@@ -179,6 +179,8 @@ def identify_uae_city(lat, lon):
         return "Fujairah / East Coast"
 
     # 2. Al Ain City + E66/E55 Highway Corridor (Al Shuwaib, Al Faqa, Sweihan, South Al Madam)
+    if lat < 24.35:
+        return "Al Ain"
     if lat < 24.82 and 55.35 <= lon < 55.95:
         return "Al Ain"
     if 24.82 <= lat < 25.02 and 55.55 <= lon < 55.95:
