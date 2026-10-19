@@ -169,26 +169,26 @@ def is_in_oman(lat, lon):
 def identify_uae_city(lat, lon):
     """
     Granular UAE City & Corridor classification:
-      - 'Fujairah / East Coast': Includes Fujairah, Kalba, Khor Fakkan, Dibba, AND Hatta / Masfout (lon >= 55.95).
-      - 'Al Ain': Includes Al Ain city PLUS the E66/E55 Al Shuwaib / Al Faqa / Al Madam corridor heading to Al Ain.
-      - 'Sharjah (Near Dubai)': High-traffic border zone (Al Nahda, Al Khan, Al Majaz, Industrial Areas).
-      - 'Sharjah (North / Inland)': Easy highway return corridor (Muwaileh North, Rahmaniya, Sajaa, Dhaid).
+      - 'Abu Dhabi': Strictly includes all western sectors (lon < 54.95).
+      - 'Fujairah / East Coast': Includes Hatta / Masfout (lon >= 55.95).
+      - 'Al Ain': Includes Al Ain city, deep southern approach (< 24.35), 
+        and the E66/E55 Al Shuwaib / Al Faqa corridor.
     """
-    # 1. Fujairah, East Coast & Hatta / Masfout Mountain Corridor
+    # 1. Strictly Abu Dhabi for all western coordinates (lon < 54.95)
+    if lon < 54.95:
+        return "Abu Dhabi"
+
+    # 2. Fujairah, East Coast & Hatta / Masfout Mountain Corridor
     if lon >= 55.95 and lat >= 24.70:
         return "Fujairah / East Coast"
 
-    # 2. Al Ain City + E66/E55 Highway Corridor (Al Shuwaib, Al Faqa, Sweihan, South Al Madam)
+    # 3. Al Ain City + Deep Southern Approach (< 24.35) + E66/E55 Highway Corridor
     if lat < 24.35:
         return "Al Ain"
     if lat < 24.82 and 55.35 <= lon < 55.95:
         return "Al Ain"
     if 24.82 <= lat < 25.02 and 55.55 <= lon < 55.95:
         return "Al Ain"
-
-    # 3. Abu Dhabi
-    if lon < 54.95 or (lat < 24.80 and lon < 55.35):
-        return "Abu Dhabi"
 
     # 4. Ras Al Khaimah
     if lat >= 25.62 and 55.70 <= lon < 56.15:
