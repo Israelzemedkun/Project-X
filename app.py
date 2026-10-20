@@ -881,203 +881,259 @@ def build_google_maps_nav_links(wh_lat, wh_lon, stops):
 
 
 # ==========================================
-# 6. SIDEBAR SETTINGS & DUAL DATA SOURCES (CSV + API)
+# 6. SIDEBAR SETTINGS & DRIVER MAP FILTER
 # ==========================================
 db_stats = get_recent_driver_stats()
-default_far_yesterday = [
-    d for d, st_info in db_stats.items() if st_info["went_far_yesterday"]
-]
+default_far_yesterday = [d for d, st_info in db_stats.items() if st_info["went_far_yesterday"]]
 
 st.sidebar.title("🧪 V2 LAB — Dispatch & Rotation")
 
-# Dual Input Options: CSV Backup + Live API Sync
-st.sidebar.markdown("### 📂 Data Input Source")
-data_source = st.sidebar.radio(
-    "Choose Mode:", ["Upload CSV File", "⚡ Live API Sync (Lion Delivery)"]
+selected_driver_filter = st.sidebar.selectbox(
+    "🔍 View Driver on Map",
+    options=["Show All Drivers"] + FLEET_DRIVERS,
+    index=0
 )
 
-raw_rows = []
-fieldnames = ["Bag_Number", "Map_URL", "Bags"]
-bag_col = "Bag_Number"
-source_name = "manual_input"
-raw_bytes_len = 0
+uploaded_file = st.sidebar.file_uploader("1. Upload 'lion_delivery_all_bags.csv'", type=["csv"])
 
-if data_source == "Upload CSV File":
-  uploaded_file = st.sidebar.file_uploader(
-      "Upload 'lion_delivery_all_bags.csv'", type=["csv"]
-  )
-  if uploaded_file is not None:
-    raw_bytes = uploaded_file.getvalue()
-    raw_bytes_len = len(raw_bytes)
-    source_name = uploaded_file.name
-    content = raw_bytes.decode("utf-8-sig").splitlines()
-    reader = csv.DictReader(content)
-    raw_rows = list(reader)
-    if reader.fieldnames:
-      fieldnames = reader.fieldnames
-      bag_col = fieldnames[0]
-
-else:
-  st.sidebar.markdown("#### 🔑 Live API Credentials")
-  api_token = st.sidebar.text_input("API Bearer Token (JWT)", type="password")
-  api_endpoint = st.sidebar.text_input(
-      "API Endpoint URL",
-      value=(
-          "https://api.liondelivery.ae/api/v1/delivery-returns/?page=1&page_size=100&stage=RETRYING&ordering=newest"
-      ),
-  )
-
-  if st.sidebar.button("⚡ Fetch Live Orders Now"):
-    if not api_token:
-      st.sidebar.error("Please enter your Bearer Token.")
-    else:
-      with st.spinner("Fetching orders from api.liondelivery.ae..."):
-        headers = {
-            "authorization": f"Bearer {api_token}",
-            "accept": "application/json",
-        }
-        next_url = api_endpoint
-        extracted_items = []
-
-        def extract_bag_objects(obj, found=None):
-          if found is None:
-            found = []
-          if not obj or not isinstance(obj, (dict, list)):
-            return found
-          if isinstance(obj, list):
-            for el in obj:
-              extract_bag_objects(el, found)
-            return found
-          target = obj.get("stop") if isinstance(obj.get("stop"), dict) else obj
-          if target.get("bag_code") or target.get("tracking_number"):
-            found.append(target)
-            return found
-          for key in obj:
-            extract_bag_objects(obj[key], found)
-          return found
-
-        try:
-          while next_url:
-            resp = requests.get(next_url, headers=headers, timeout=15)
-            if resp.status_code != 200:
-              st.sidebar.error(f"API Error {resp.status_code}: {resp.text}")
-              break
-            data = resp.json()
-            stops = extract_bag_objects(data)
-
-            for s in stops:
-              bag_code = s.get("bag_code") or s.get("tracking_number")
-              lat = s.get("latitude")
-              lon = s.get("longitude")
-              map_url = s.get("location_url_snapshot") or ""
-              if not map_url and lat and lon:
-                map_url = f"https://www.google.com/maps?q={lat},{lon}"
-
-              if bag_code and map_url:
-                extracted_items.append({
-                    "Bag_Number": bag_code,
-                    "Map_URL": map_url,
-                    "Bags": 1,
-                })
-
-            next_url = (
-                data.get("next")
-                or data.get("data", {}).get("next")
-                or data.get("results", {}).get("next")
-            )
-            if next_url and next_url.startswith("http://"):
-              next_url = next_url.replace("http://", "https://")
-
-          if extracted_items:
-            st.session_state["api_raw_rows"] = extracted_items
-            st.sidebar.success(
-                f"Successfully pulled {len(extracted_items)} active orders!"
-            )
-          else:
-            st.sidebar.warning(
-                "Connected successfully, but returned 0 orders."
-            )
-        except Exception as e:
-          st.sidebar.error(f"Connection failed: {e}")
-
-  # Load from session state if already fetched via API
-  if "api_raw_rows" in st.session_state:
-    raw_rows = st.session_state["api_raw_rows"]
-    raw_bytes_len = len(str(raw_rows))
-    source_name = "live_api_sync"
-    fieldnames = ["Bag_Number", "Map_URL", "Bags"]
-    bag_col = "Bag_Number"
-
-st.sidebar.markdown("---")
 st.sidebar.markdown("### 👥 Driver Rotation Rules")
 far_yesterday_input = st.sidebar.multiselect(
     "Went Far Yesterday (Al Ain / Abu Dhabi / Fujairah / RAK):",
     options=FLEET_DRIVERS,
-    default=default_far_yesterday,
+    default=default_far_yesterday
 )
 resting_today_input = st.sidebar.multiselect(
-    "Resting / Off Today:", options=FLEET_DRIVERS, default=[]
+    "Resting / Off Today:",
+    options=FLEET_DRIVERS,
+    default=[]
 )
 
 st.sidebar.markdown("### ⚙️ V2 Route & Backfill Rules")
-target_drivers_input = st.sidebar.slider(
-    "Target Morning Drivers", min_value=3, max_value=7, value=5
-)
-max_bags_local_input = st.sidebar.slider(
-    "Max Bags (Local Driver - DXB/SHJ)", min_value=15, max_value=25, value=21
-)
-max_bags_distant_input = st.sidebar.slider(
-    "Target Cap (Distant Driver w/ Backfill)",
-    min_value=14,
-    max_value=19,
-    value=16,
-)
-min_bags_input = st.sidebar.slider(
-    "Min Bags per Driver (Combine / Backfill)", min_value=6, max_value=12, value=10
-)
-max_dist_input = st.sidebar.number_input(
-    "Max Warehouse Road Distance (KM)", value=240.0, step=10.0
-)
+target_drivers_input = st.sidebar.slider("Target Morning Drivers", min_value=3, max_value=7, value=5)
+max_bags_local_input = st.sidebar.slider("Max Bags (Local Driver - DXB/SHJ)", min_value=15, max_value=25, value=21)
+max_bags_distant_input = st.sidebar.slider("Target Cap (Distant Driver w/ Backfill)", min_value=14, max_value=19, value=16)
+min_bags_input = st.sidebar.slider("Min Bags per Driver (Combine / Backfill)", min_value=6, max_value=12, value=10)
+max_dist_input = st.sidebar.number_input("Max Warehouse Road Distance (KM)", value=240.0, step=10.0)
 
 
 # ==========================================
-# 7. MAIN APPLICATION PIPELINE CHECK
+# 7. MAIN APPLICATION PIPELINE
 # ==========================================
 wh_lat, wh_lon = resolve_google_maps_url(WAREHOUSE_URL)
 if not wh_lat:
-  st.error("Failed to resolve warehouse coordinates from URL.")
-  st.stop()
+    st.error("Failed to resolve warehouse coordinates from URL.")
+    st.stop()
 
-if not raw_rows:
-  st.info(
-      "👋 Please either **upload your CSV file** or use the **Live API Sync** in"
-      " the sidebar to load orders."
-  )
-  with st.expander("📊 View 7-Day Driver Rotation History"):
-    hist_rows = [
-        {
-            "Driver": d,
-            "7-Day KM": round(info["km_7d"], 1),
-            "7-Day Bags": info["bags_7d"],
-            "Distant Trips (7d)": info["distant_count_7d"],
-            "Last Area": info["last_city"],
-        }
-        for d, info in db_stats.items()
-    ]
-    st.table(hist_rows)
-  st.stop()
+if uploaded_file is None:
+    st.info("👋 Upload today's scraped `lion_delivery_all_bags.csv` in the sidebar to test the V2 Primary-First + Return Micro-Cluster engine.")
+    with st.expander("📊 View 7-Day Driver Rotation History"):
+        hist_rows = [
+            {
+                "Driver": d,
+                "7-Day KM": round(info["km_7d"], 1),
+                "7-Day Bags": info["bags_7d"],
+                "Distant Trips (7d)": info["distant_count_7d"],
+                "Last Area": info["last_city"]
+            }
+            for d, info in db_stats.items()
+        ]
+        st.table(hist_rows)
+    st.stop()
+
+raw_bytes = uploaded_file.getvalue()
+content = raw_bytes.decode("utf-8-sig").splitlines()
+reader = csv.DictReader(content)
+raw_rows = list(reader)
+fieldnames = reader.fieldnames or []
+bag_col = fieldnames[0] if fieldnames else "Bag_Number"
 
 current_config_sig = (
-    source_name,
-    raw_bytes_len,
+    uploaded_file.name,
+    len(raw_bytes),
     target_drivers_input,
     max_bags_local_input,
     max_bags_distant_input,
     min_bags_input,
     max_dist_input,
     tuple(sorted(far_yesterday_input)),
-    tuple(sorted(resting_today_input)),
+    tuple(sorted(resting_today_input))
 )
+
+force_rerun = st.sidebar.button("🔄 Re-Run V2 Optimization")
+
+if (
+    "dispatch_data" not in st.session_state
+    or st.session_state.get("config_sig") != current_config_sig
+    or force_rerun
+):
+    with st.spinner("Running V2 Primary-First Sequencing & Micro-Cluster Backfill..."):
+        resolved, unresolvable, oman_stops = [], [], []
+        url_col = next((c for c in fieldnames if any(k in c.lower() for k in ["url", "link", "map", "location"])), None)
+
+        for row in raw_rows:
+            lat, lon = resolve_google_maps_url(row.get(url_col, ""))
+            if lat and lon:
+                if is_in_oman(lat, lon):
+                    oman_stops.append({
+                        "row_data": row,
+                        "lat": lat,
+                        "lon": lon,
+                        "city": "Oman Territory / Border",
+                        "bags": int(float(row.get("Bags", 1) or 1))
+                    })
+                else:
+                    resolved.append({
+                        "row_data": row,
+                        "lat": lat,
+                        "lon": lon,
+                        "bags": int(float(row.get("Bags", 1) or 1)),
+                        "city": identify_uae_city(lat, lon)
+                    })
+            else:
+                unresolvable.append(row)
+
+        if not resolved:
+            st.error("Could not resolve valid UAE coordinates from the uploaded CSV.")
+            st.stop()
+
+        all_coords = [(wh_lat, wh_lon)] + [(s["lat"], s["lon"]) for s in resolved]
+        full_matrix = build_road_distance_matrix(all_coords)
+
+        valid_stops, far_stops = [], []
+        for i, stop in enumerate(resolved, start=1):
+            stop["wh_road_km"] = full_matrix[0][i]
+            if stop["wh_road_km"] > max_dist_input:
+                far_stops.append(stop)
+            else:
+                valid_stops.append(stop)
+
+        deliv_coords = [(wh_lat, wh_lon)] + [(s["lat"], s["lon"]) for s in valid_stops]
+        dist_mat = build_road_distance_matrix(deliv_coords)
+        valid_cities = [s["city"] for s in valid_stops]
+
+        routes = build_v2_morning_routes(
+            dist_mat,
+            valid_stops,
+            target_drivers=target_drivers_input,
+            max_local_bags=max_bags_local_input,
+            max_distant_bags=max_bags_distant_input,
+            min_driver_bags=min_bags_input,
+            max_route_km=600.0
+        )
+
+        driver_route_pairs = assign_drivers_with_rotation(
+            routes, valid_stops, dist_mat,
+            far_yesterday_names=far_yesterday_input,
+            resting_today_names=resting_today_input
+        )
+
+        final_rows = []
+        for d_name, route in driver_route_pairs:
+            ordered, total_km = optimize_route_order(route, dist_mat, valid_cities)
+            total_bags = sum(valid_stops[n - 1]["bags"] for n in ordered)
+            corridor_label = get_primary_route_label(ordered, valid_stops)
+            driver_display = f"{d_name} ({corridor_label})"
+            has_distant_in_route = any(valid_stops[n - 1]["city"] in DISTANT_CITIES for n in ordered)
+
+            route_temp_rows = []
+            prev = 0
+            for seq, node in enumerate(ordered, start=1):
+                stop = valid_stops[node - 1]
+                leg_km = dist_mat[prev][node]
+                prev = node
+                phase_label = (
+                    "Primary City"
+                    if (not has_distant_in_route or stop["city"] in DISTANT_CITIES)
+                    else "Return-Leg Cluster"
+                )
+                item = dict(stop["row_data"])
+                item.update({
+                    "Assigned_Driver": d_name,
+                    "Driver_ID": driver_display,
+                    "Stop_Sequence": seq,
+                    "Stop_Phase": phase_label,
+                    "City_Area": stop["city"],
+                    "Warehouse_Road_KM": round(stop["wh_road_km"], 2),
+                    "Leg_Distance_KM": round(leg_km, 2),
+                    "Route_Total_Bags": total_bags,
+                    "Route_OneWay_KM": round(total_km, 2),
+                    "Resolved_Lat": round(stop["lat"], 6),
+                    "Resolved_Lon": round(stop["lon"], 6),
+                    "Dispatch_Status": "ASSIGNED_630AM"
+                })
+                route_temp_rows.append(item)
+
+            est_finish, est_hrs = predict_driver_finish_time(route_temp_rows, total_km)
+            for item in route_temp_rows:
+                item["Est_Finish_Time"] = est_finish
+                item["Est_Shift_Hours"] = est_hrs
+                final_rows.append(item)
+
+        for fs in far_stops:
+            item = dict(fs["row_data"])
+            item.update({
+                "Assigned_Driver": "NOT GOING",
+                "Driver_ID": f"NOT GOING - VERY FAR (>{int(max_dist_input)}KM)",
+                "Stop_Sequence": "",
+                "Stop_Phase": "Excluded",
+                "City_Area": fs["city"],
+                "Warehouse_Road_KM": round(fs["wh_road_km"], 2),
+                "Leg_Distance_KM": "",
+                "Route_Total_Bags": "",
+                "Route_OneWay_KM": "",
+                "Est_Finish_Time": "",
+                "Est_Shift_Hours": "",
+                "Resolved_Lat": round(fs["lat"], 6),
+                "Resolved_Lon": round(fs["lon"], 6),
+                "Dispatch_Status": "UNABLE_TO_DELIVER_TOO_FAR"
+            })
+            final_rows.append(item)
+
+        for os_stop in oman_stops:
+            item = dict(os_stop["row_data"])
+            item.update({
+                "Assigned_Driver": "NOT GOING",
+                "Driver_ID": "NOT GOING - OUTSIDE UAE (OMAN)",
+                "Stop_Sequence": "",
+                "Stop_Phase": "Excluded",
+                "City_Area": "Oman Territory",
+                "Warehouse_Road_KM": "",
+                "Leg_Distance_KM": "",
+                "Route_Total_Bags": "",
+                "Route_OneWay_KM": "",
+                "Est_Finish_Time": "",
+                "Est_Shift_Hours": "",
+                "Resolved_Lat": round(os_stop["lat"], 6),
+                "Resolved_Lon": round(os_stop["lon"], 6),
+                "Dispatch_Status": "EXCLUDED_OUTSIDE_UAE"
+            })
+            final_rows.append(item)
+
+        st.session_state["dispatch_data"] = final_rows
+        st.session_state["config_sig"] = current_config_sig
+
+master_rows = st.session_state["dispatch_data"]
+
+active_driver_ids = []
+active_named_drivers = []
+for r in master_rows:
+    d_id = r.get("Driver_ID", "")
+    d_name = r.get("Assigned_Driver", "")
+    if d_id and "NOT GOING" not in d_id and d_id != "UNASSIGNED":
+        if d_id not in active_driver_ids:
+            active_driver_ids.append(d_id)
+        if d_name and d_name not in active_named_drivers:
+            active_named_drivers.append(d_name)
+
+resting_drivers_today = [d for d in FLEET_DRIVERS if d not in active_named_drivers]
+total_bags_assigned = sum(int(float(r.get("Bags", 1) or 1)) for r in master_rows if "NOT GOING" not in r["Driver_ID"])
+excluded_bags = [r for r in master_rows if "NOT GOING" in r["Driver_ID"]]
+
+kpi1, kpi2, kpi3, kpi4 = st.columns(4)
+kpi1.metric("Active Drivers", f"{len(active_driver_ids)} / 7")
+kpi2.metric("Total Bags Assigned", total_bags_assigned)
+kpi3.metric("Resting Drivers", ", ".join(resting_drivers_today) if resting_drivers_today else "None")
+kpi4.metric(f"Excluded (>{int(max_dist_input)}km / Oman)", len(excluded_bags))
 
 # ==========================================
 # 8. MANUAL CONTROLS
