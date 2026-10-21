@@ -1,5 +1,7 @@
-﻿import csv
+﻿import base64
+import csv
 import io
+import json
 import math
 import os
 import re
@@ -22,7 +24,7 @@ st.set_page_config(
 )
 
 WAREHOUSE_URL = "https://maps.app.goo.gl/KxepQZ1YGK4qYeND7"
-DEFAULT_LOCATION_BOARD_API = "https://api.liondelivery.ae/api/v1/dispatcher/operations/location-board/?page=1&page_size=200"
+DEFAULT_LOCATION_BOARD_API = "https://api.liondelivery.ae/api/v1/dispatcher/operations/location-board/"
 DB_PATH = "dispatch_history.db"
 
 FLEET_DRIVERS = [
@@ -50,7 +52,11 @@ DRIVER_COLORS = [
 
 session = requests.Session()
 session.headers.update({
-    "User-Agent": "LionDeliveryDispatchApp/2.0 (dispatch-portal-v2; contact@liondelivery.local)"
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    "Accept": "application/json",
+    "Content-Type": "application/json",
+    "Origin": "https://app.liondelivery.ae",
+    "Referer": "https://app.liondelivery.ae/"
 })
 
 
@@ -191,7 +197,7 @@ def identify_uae_city(lat, lon):
 
 
 # ==========================================
-# 3. URL RESOLUTION, LIVE API & OSRM MATRICES
+# 3. URL RESOLUTION, AUTO-LOGIN API & OSRM MATRICES
 # ==========================================
 @st.cache_data(show_spinner=False)
 def resolve_google_maps_url(url):
@@ -237,10 +243,6 @@ def resolve_google_maps_url(url):
 
 
 def extract_row_coordinates(row, url_col):
-    """
-    Fast path: Check if Latitude and Longitude are already provided in the CSV/API row.
-    Fallback: Resolve Map_URL if Latitude/Longitude are blank.
-    """
     lat_val = row.get("Latitude") or row.get("latitude") or row.get("Lat")
     lon_val = row.get("Longitude") or row.get("longitude") or row.get("Lon")
     if lat_val and lon_val:
@@ -255,41 +257,142 @@ def extract_row_coordinates(row, url_col):
     return resolve_google_maps_url(row.get(url_col, ""))
 
 
-def obtain_fresh_jwt_token(login_Or_refresh_url, username, password, refresh_token):
-    """Request a fresh 15-minute access token using either a Refresh Token or Login Credentials."""
-    try:
-        if refresh_token:
-            resp = session.post(
-                login_Or_refresh_url,
-                json={"refresh": refresh_token.strip()},
-                timeout=12
-            )
-            if resp.status_code == 200:
-                data = resp.json()
-                tok = data.get("access") or data.get("token") or data.get("data", {}).get("access")
-                if tok:
-                    return tok, None
+def find_access_jwt_in_response(obj):
+    """Recursively scan any JSON login response to extract the SimpleJWT 'access' token."""
+    raw_text = json.dumps(obj)
+    matches = re.findall(r"eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+", raw_text)
+    fallback_jwt = None
+    for jwt_str in matches:
+        fallback_jwt = jwt_str
+        try:
+            payload_b64 = jwt_str.split(".")[1]
+            payload_b64 += "=" * (-len(payload_b64) % 4)
+            payload = json.loads(base64.urlsafe_b64decode(payload_b64).decode("utf-8"))
+            if payload.get("token_type") == "access":
+                return jwt_str
+        except Exception:
+            pass
+    return fallback_jwt
 
-        if username and password:
-            for payload in [
-                {"email": username.strip(), "password": password},
-                {"username": username.strip(), "password": password},
-            ]:
-                resp = session.post(login_Or_refresh_url, json=payload, timeout=12)
-                if resp.status_code == 200:
+
+def obtain_fresh_jwt_token(custom_login_url, email_or_user, password):
+    """
+    Automatically authenticate against api.liondelivery.ae to get a fresh 15-min access token.
+    Tests the provided login URL plus standard Django REST / SimpleJWT endpoints.
+    """
+    candidate_urls = []
+    if custom_login_url and custom_login_url.strip():
+        candidate_urls.append(custom_login_url.strip())
+
+    for default_u in [
+        "https://api.liondelivery.ae/api/v1/auth/login/",
+        "https://api.liondelivery.ae/api/v1/users/login/",
+        "https://api.liondelivery.ae/api/v1/accounts/login/",
+        "https://api.liondelivery.ae/api/v1/auth/token/",
+        "https://api.liondelivery.ae/api/v1/token/",
+    ]:
+        if default_u not in candidate_urls:
+            candidate_urls.append(default_u)
+
+    user_clean = email_or_user.strip()
+    payloads = [
+        {"email": user_clean, "password": password},
+        {"username": user_clean, "password": password},
+    ]
+
+    last_err = ""
+    for url in candidate_urls:
+        for pl in payloads:
+            try:
+                resp = session.post(url, json=pl, timeout=12)
+                if resp.status_code in (200, 201):
                     data = resp.json()
-                    tok = (
-                        data.get("access")
-                        or data.get("token")
-                        or data.get("data", {}).get("access")
-                        or data.get("tokens", {}).get("access")
-                    )
+                    tok = find_access_jwt_in_response(data)
                     if tok:
                         return tok, None
-            return None, f"Auth failed ({resp.status_code}): {resp.text[:160]}"
-    except Exception as e:
-        return None, str(e)
-    return None, "Could not obtain token."
+                elif resp.status_code != 404:
+                    last_err = f"{url} returned {resp.status_code}: {resp.text[:180]}"
+            except Exception as e:
+                last_err = str(e)
+
+    return None, last_err or "Could not find matching login endpoint. Check Login URL."
+
+
+def pull_all_location_board_bags(base_endpoint, bearer_token):
+    """Loop through page=1, 2, 3... on location-board just like the Tampermonkey exporter."""
+    clean_tok = bearer_token.replace("Bearer ", "").strip()
+    headers = {
+        "authorization": f"Bearer {clean_tok}",
+        "accept": "application/json"
+    }
+
+    def extract_bag_objects(obj, found=None):
+        if found is None:
+            found = []
+        if not obj or not isinstance(obj, (dict, list)):
+            return found
+        if isinstance(obj, list):
+            for el in obj:
+                extract_bag_objects(el, found)
+            return found
+        target = obj.get("stop") if isinstance(obj.get("stop"), dict) else obj
+        has_code = (
+            target.get("bag_code")
+            or target.get("bag_number")
+            or (isinstance(target.get("code"), str) and "LD-BAG" in target.get("code"))
+        )
+        if has_code or (target.get("latitude") and target.get("longitude") and target.get("tracking_number")):
+            found.append(target)
+            return found
+        for key in obj:
+            extract_bag_objects(obj[key], found)
+        return found
+
+    base_clean = base_endpoint.split("?")[0].strip()
+    extracted_map = {}
+
+    for page_num in range(1, 35):
+        page_url = f"{base_clean}?page={page_num}&page_size=100"
+        resp = session.get(page_url, headers=headers, timeout=15)
+        if resp.status_code != 200:
+            if page_num == 1:
+                return None, f"API Error {resp.status_code}: {resp.text[:200]}"
+            break
+
+        data = resp.json()
+        stops = extract_bag_objects(data)
+        if not stops:
+            break
+
+        added_this_page = 0
+        for s in stops:
+            bag_code = s.get("bag_code") or s.get("bag_number") or s.get("code") or s.get("tracking_number")
+            if not bag_code:
+                continue
+            lat = s.get("latitude") or s.get("lat") or ""
+            lon = s.get("longitude") or s.get("lng") or s.get("lon") or ""
+            map_url = s.get("location_url_snapshot") or s.get("location_url") or s.get("map_url") or ""
+            if not map_url and lat and lon:
+                map_url = f"https://www.google.com/maps?q={lat},{lon}"
+            area = s.get("area_snapshot") or s.get("emirate_snapshot") or s.get("city_zone_snapshot") or "UAE Corridor"
+            if "http" in str(area):
+                area = "UAE Corridor"
+
+            if bag_code not in extracted_map and (map_url or (lat and lon)):
+                extracted_map[bag_code] = {
+                    "Bag_Number": str(bag_code),
+                    "Map_URL": str(map_url),
+                    "Latitude": str(lat),
+                    "Longitude": str(lon),
+                    "Area": str(area),
+                    "Bags": 1
+                }
+                added_this_page += 1
+
+        if added_this_page == 0 or len(stops) < 100:
+            break
+
+    return list(extracted_map.values()), None
 
 
 @st.cache_data(show_spinner=False)
@@ -938,7 +1041,7 @@ def build_google_maps_nav_links(wh_lat, wh_lon, stops):
 
 
 # ==========================================
-# 6. SIDEBAR: DUAL INPUT (CSV UPLOAD + LIVE API SYNC)
+# 6. SIDEBAR: DUAL INPUT (CSV UPLOAD + AUTO-LOGIN API SYNC)
 # ==========================================
 db_stats = get_recent_driver_stats()
 default_far_yesterday = [d for d, st_info in db_stats.items() if st_info["went_far_yesterday"]]
@@ -977,120 +1080,61 @@ if data_source == "Upload CSV File":
             fieldnames = list(reader.fieldnames)
             bag_col = fieldnames[0]
 else:
-    api_endpoint = st.sidebar.text_input(
-        "Location-Board Endpoint",
-        value=DEFAULT_LOCATION_BOARD_API
-    )
-    auth_mode = st.sidebar.selectbox(
-        "Authentication Method",
-        ["Bearer Token (Direct)", "Auto-Login / Refresh Token (Never Expires)"]
-    )
+    secret_email = ""
+    secret_pass = ""
+    secret_token = ""
+    try:
+        secret_email = st.secrets.get("LION_EMAIL", "sole@gmail.com")
+        secret_pass = st.secrets.get("LION_PASSWORD", "")
+        secret_token = st.secrets.get("LION_API_TOKEN", "")
+    except Exception:
+        secret_email = "sole@gmail.com"
 
-    api_token = ""
-    if auth_mode == "Bearer Token (Direct)":
-        default_tok = st.secrets.get("LION_API_TOKEN", "") if hasattr(st, "secrets") else ""
-        api_token = st.sidebar.text_input("Bearer Token (JWT)", value=default_tok, type="password")
-    else:
-        auth_url = st.sidebar.text_input(
-            "Login or Token Refresh API URL",
+    ld_user = st.sidebar.text_input("Lion Delivery Email", value=secret_email)
+    ld_pass = st.sidebar.text_input("Lion Delivery Password", value=secret_pass, type="password")
+
+    with st.sidebar.expander("🔧 Advanced API / Token Override"):
+        auth_url = st.text_input(
+            "Login Endpoint URL",
             value="https://api.liondelivery.ae/api/v1/auth/login/"
         )
-        ld_user = st.sidebar.text_input("Lion Delivery Email / Username")
-        ld_pass = st.sidebar.text_input("Lion Delivery Password", type="password")
-        ld_refresh = st.sidebar.text_input("Or Long-Lived Refresh Token (Optional)", type="password")
+        api_endpoint = st.text_input(
+            "Location-Board Endpoint",
+            value=DEFAULT_LOCATION_BOARD_API
+        )
+        manual_bearer = st.text_input(
+            "Optional Direct Bearer Token",
+            value=secret_token,
+            type="password"
+        )
 
-    if st.sidebar.button("⚡ Fetch Live Location-Board Orders"):
-        active_token = api_token.strip()
-        if auth_mode != "Bearer Token (Direct)":
-            with st.spinner("Requesting fresh 15-minute access token..."):
-                fresh_tok, err_msg = obtain_fresh_jwt_token(auth_url, ld_user, ld_pass, ld_refresh)
+    if st.sidebar.button("⚡ Fetch Live Location-Board Orders", type="primary"):
+        active_token = ""
+        if ld_user and ld_pass:
+            with st.spinner("Logging in for fresh 15-minute access token..."):
+                fresh_tok, err_msg = obtain_fresh_jwt_token(auth_url, ld_user, ld_pass)
                 if fresh_tok:
                     active_token = fresh_tok
+                elif manual_bearer.strip():
+                    active_token = manual_bearer.strip()
                 else:
-                    st.sidebar.error(err_msg)
-
-        if not active_token:
-            st.sidebar.error("Please provide a valid Bearer Token or Login credentials.")
+                    st.sidebar.error(f"Auto-login error: {err_msg}")
+        elif manual_bearer.strip():
+            active_token = manual_bearer.strip()
         else:
+            st.sidebar.error("Enter your password (or save LION_PASSWORD in Streamlit Secrets).")
+
+        if active_token:
             with st.spinner("Pulling all pages from location-board..."):
-                headers = {
-                    "authorization": f"Bearer {active_token.replace('Bearer ', '').strip()}",
-                    "accept": "application/json"
-                }
-                next_url = api_endpoint
-                extracted_map = {}
-
-                def extract_bag_objects(obj, found=None):
-                    if found is None:
-                        found = []
-                    if not obj or not isinstance(obj, (dict, list)):
-                        return found
-                    if isinstance(obj, list):
-                        for el in obj:
-                            extract_bag_objects(el, found)
-                        return found
-                    target = obj.get("stop") if isinstance(obj.get("stop"), dict) else obj
-                    has_code = (
-                        target.get("bag_code")
-                        or target.get("bag_number")
-                        or (isinstance(target.get("code"), str) and "LD-BAG" in target.get("code"))
-                    )
-                    if has_code or (target.get("latitude") and target.get("longitude") and target.get("tracking_number")):
-                        found.append(target)
-                        return found
-                    for key in obj:
-                        extract_bag_objects(obj[key], found)
-                    return found
-
-                try:
-                    page_guard = 0
-                    while next_url and page_guard < 50:
-                        page_guard += 1
-                        resp = session.get(next_url, headers=headers, timeout=15)
-                        if resp.status_code != 200:
-                            st.sidebar.error(f"API Error {resp.status_code}: {resp.text[:200]}")
-                            break
-                        data = resp.json()
-                        stops = extract_bag_objects(data)
-
-                        for s in stops:
-                            bag_code = s.get("bag_code") or s.get("bag_number") or s.get("code") or s.get("tracking_number")
-                            if not bag_code:
-                                continue
-                            lat = s.get("latitude") or s.get("lat") or ""
-                            lon = s.get("longitude") or s.get("lng") or s.get("lon") or ""
-                            map_url = s.get("location_url_snapshot") or s.get("location_url") or s.get("map_url") or ""
-                            if not map_url and lat and lon:
-                                map_url = f"https://www.google.com/maps?q={lat},{lon}"
-                            area = s.get("area_snapshot") or s.get("emirate_snapshot") or "UAE Corridor"
-                            if "http" in str(area):
-                                area = "UAE Corridor"
-
-                            if bag_code not in extracted_map and (map_url or (lat and lon)):
-                                extracted_map[bag_code] = {
-                                    "Bag_Number": bag_code,
-                                    "Map_URL": map_url,
-                                    "Latitude": str(lat),
-                                    "Longitude": str(lon),
-                                    "Area": str(area),
-                                    "Bags": 1
-                                }
-
-                        nxt = (
-                            data.get("next")
-                            or (data.get("data") if isinstance(data.get("data"), dict) else {}).get("next")
-                            or (data.get("results") if isinstance(data.get("results"), dict) else {}).get("next")
-                        )
-                        next_url = nxt.replace("http://", "https://") if (isinstance(nxt, str) and nxt.startswith("http")) else None
-
-                    if extracted_map:
-                        st.session_state["api_raw_rows"] = list(extracted_map.values())
-                        st.session_state["api_sync_counter"] = st.session_state.get("api_sync_counter", 0) + 1
-                        st.sidebar.success(f"✅ Synced {len(extracted_map)} bags from location-board!")
-                    else:
-                        st.sidebar.warning("Connected to API, but 0 bags were returned.")
-                except Exception as e:
-                    st.sidebar.error(f"API Connection Error: {e}")
+                pulled_rows, pull_err = pull_all_location_board_bags(api_endpoint, active_token)
+                if pull_err:
+                    st.sidebar.error(pull_err)
+                elif pulled_rows:
+                    st.session_state["api_raw_rows"] = pulled_rows
+                    st.session_state["api_sync_counter"] = st.session_state.get("api_sync_counter", 0) + 1
+                    st.sidebar.success(f"✅ Synced {len(pulled_rows)} live bags from location-board!")
+                else:
+                    st.sidebar.warning("Connected successfully, but 0 bags are currently on the location-board.")
 
     if "api_raw_rows" in st.session_state:
         raw_rows = st.session_state["api_raw_rows"]
@@ -1128,7 +1172,7 @@ if not wh_lat:
     st.stop()
 
 if not raw_rows:
-    st.info("👋 Upload `lion_delivery_all_bags.csv` OR use **⚡ Live API Sync (location-board)** in the sidebar.")
+    st.info("👋 Upload `lion_delivery_all_bags.csv` OR switch to **⚡ Live API Sync (location-board)** in the sidebar.")
     with st.expander("📊 View 7-Day Driver Rotation History"):
         hist_rows = [
             {
