@@ -22,6 +22,7 @@ st.set_page_config(
 )
 
 WAREHOUSE_URL = "https://maps.app.goo.gl/KxepQZ1YGK4qYeND7"
+DEFAULT_LOCATION_BOARD_API = "https://api.liondelivery.ae/api/v1/dispatcher/operations/location-board/?page=1&page_size=200"
 DB_PATH = "dispatch_history.db"
 
 FLEET_DRIVERS = [
@@ -190,14 +191,14 @@ def identify_uae_city(lat, lon):
 
 
 # ==========================================
-# 3. URL RESOLUTION & OSRM ROAD MATRICES
+# 3. URL RESOLUTION, LIVE API & OSRM MATRICES
 # ==========================================
 @st.cache_data(show_spinner=False)
 def resolve_google_maps_url(url):
     if not url:
         return None, None
 
-    unquoted = urllib.parse.unquote(str(url).strip())
+    unquoted = urllib.parse.unquote(str(url).strip().strip("'").strip('"'))
     patterns = [
         r"/dir/[^/]+/(-?\d+\.\d+)\s*,\s*[+]?(-?\d+\.\d+)",
         r"!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)",
@@ -214,7 +215,7 @@ def resolve_google_maps_url(url):
                 return lat, lon
 
     try:
-        resp = session.get(url, allow_redirects=True, timeout=12)
+        resp = session.get(unquoted, allow_redirects=True, timeout=12)
         final_url = urllib.parse.unquote(resp.url)
         for pat in patterns:
             match = re.search(pat, final_url)
@@ -233,6 +234,62 @@ def resolve_google_maps_url(url):
         pass
 
     return None, None
+
+
+def extract_row_coordinates(row, url_col):
+    """
+    Fast path: Check if Latitude and Longitude are already provided in the CSV/API row.
+    Fallback: Resolve Map_URL if Latitude/Longitude are blank.
+    """
+    lat_val = row.get("Latitude") or row.get("latitude") or row.get("Lat")
+    lon_val = row.get("Longitude") or row.get("longitude") or row.get("Lon")
+    if lat_val and lon_val:
+        try:
+            lat_f = float(str(lat_val).strip().strip("'"))
+            lon_f = float(str(lon_val).strip().strip("'"))
+            if -90 <= lat_f <= 90 and -180 <= lon_f <= 180:
+                return lat_f, lon_f
+        except ValueError:
+            pass
+
+    return resolve_google_maps_url(row.get(url_col, ""))
+
+
+def obtain_fresh_jwt_token(login_Or_refresh_url, username, password, refresh_token):
+    """Request a fresh 15-minute access token using either a Refresh Token or Login Credentials."""
+    try:
+        if refresh_token:
+            resp = session.post(
+                login_Or_refresh_url,
+                json={"refresh": refresh_token.strip()},
+                timeout=12
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                tok = data.get("access") or data.get("token") or data.get("data", {}).get("access")
+                if tok:
+                    return tok, None
+
+        if username and password:
+            for payload in [
+                {"email": username.strip(), "password": password},
+                {"username": username.strip(), "password": password},
+            ]:
+                resp = session.post(login_Or_refresh_url, json=payload, timeout=12)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    tok = (
+                        data.get("access")
+                        or data.get("token")
+                        or data.get("data", {}).get("access")
+                        or data.get("tokens", {}).get("access")
+                    )
+                    if tok:
+                        return tok, None
+            return None, f"Auth failed ({resp.status_code}): {resp.text[:160]}"
+    except Exception as e:
+        return None, str(e)
+    return None, "Could not obtain token."
 
 
 @st.cache_data(show_spinner=False)
@@ -881,7 +938,7 @@ def build_google_maps_nav_links(wh_lat, wh_lon, stops):
 
 
 # ==========================================
-# 6. SIDEBAR SETTINGS & DRIVER MAP FILTER
+# 6. SIDEBAR: DUAL INPUT (CSV UPLOAD + LIVE API SYNC)
 # ==========================================
 db_stats = get_recent_driver_stats()
 default_far_yesterday = [d for d, st_info in db_stats.items() if st_info["went_far_yesterday"]]
@@ -894,7 +951,153 @@ selected_driver_filter = st.sidebar.selectbox(
     index=0
 )
 
-uploaded_file = st.sidebar.file_uploader("1. Upload 'lion_delivery_all_bags.csv'", type=["csv"])
+st.sidebar.markdown("### 📂 1. Load Delivery Orders")
+data_source = st.sidebar.radio(
+    "Input Method:",
+    ["Upload CSV File", "⚡ Live API Sync (location-board)"],
+    index=0
+)
+
+raw_rows = []
+fieldnames = ["Bag_Number", "Map_URL", "Latitude", "Longitude", "Area", "Bags"]
+bag_col = "Bag_Number"
+source_name = "manual_csv"
+raw_bytes_len = 0
+
+if data_source == "Upload CSV File":
+    uploaded_file = st.sidebar.file_uploader("Upload 'lion_delivery_all_bags.csv'", type=["csv"])
+    if uploaded_file is not None:
+        raw_bytes = uploaded_file.getvalue()
+        raw_bytes_len = len(raw_bytes)
+        source_name = uploaded_file.name
+        content = raw_bytes.decode("utf-8-sig").splitlines()
+        reader = csv.DictReader(content)
+        raw_rows = list(reader)
+        if reader.fieldnames:
+            fieldnames = list(reader.fieldnames)
+            bag_col = fieldnames[0]
+else:
+    api_endpoint = st.sidebar.text_input(
+        "Location-Board Endpoint",
+        value=DEFAULT_LOCATION_BOARD_API
+    )
+    auth_mode = st.sidebar.selectbox(
+        "Authentication Method",
+        ["Bearer Token (Direct)", "Auto-Login / Refresh Token (Never Expires)"]
+    )
+
+    api_token = ""
+    if auth_mode == "Bearer Token (Direct)":
+        default_tok = st.secrets.get("LION_API_TOKEN", "") if hasattr(st, "secrets") else ""
+        api_token = st.sidebar.text_input("Bearer Token (JWT)", value=default_tok, type="password")
+    else:
+        auth_url = st.sidebar.text_input(
+            "Login or Token Refresh API URL",
+            value="https://api.liondelivery.ae/api/v1/auth/login/"
+        )
+        ld_user = st.sidebar.text_input("Lion Delivery Email / Username")
+        ld_pass = st.sidebar.text_input("Lion Delivery Password", type="password")
+        ld_refresh = st.sidebar.text_input("Or Long-Lived Refresh Token (Optional)", type="password")
+
+    if st.sidebar.button("⚡ Fetch Live Location-Board Orders"):
+        active_token = api_token.strip()
+        if auth_mode != "Bearer Token (Direct)":
+            with st.spinner("Requesting fresh 15-minute access token..."):
+                fresh_tok, err_msg = obtain_fresh_jwt_token(auth_url, ld_user, ld_pass, ld_refresh)
+                if fresh_tok:
+                    active_token = fresh_tok
+                else:
+                    st.sidebar.error(err_msg)
+
+        if not active_token:
+            st.sidebar.error("Please provide a valid Bearer Token or Login credentials.")
+        else:
+            with st.spinner("Pulling all pages from location-board..."):
+                headers = {
+                    "authorization": f"Bearer {active_token.replace('Bearer ', '').strip()}",
+                    "accept": "application/json"
+                }
+                next_url = api_endpoint
+                extracted_map = {}
+
+                def extract_bag_objects(obj, found=None):
+                    if found is None:
+                        found = []
+                    if not obj or not isinstance(obj, (dict, list)):
+                        return found
+                    if isinstance(obj, list):
+                        for el in obj:
+                            extract_bag_objects(el, found)
+                        return found
+                    target = obj.get("stop") if isinstance(obj.get("stop"), dict) else obj
+                    has_code = (
+                        target.get("bag_code")
+                        or target.get("bag_number")
+                        or (isinstance(target.get("code"), str) and "LD-BAG" in target.get("code"))
+                    )
+                    if has_code or (target.get("latitude") and target.get("longitude") and target.get("tracking_number")):
+                        found.append(target)
+                        return found
+                    for key in obj:
+                        extract_bag_objects(obj[key], found)
+                    return found
+
+                try:
+                    page_guard = 0
+                    while next_url and page_guard < 50:
+                        page_guard += 1
+                        resp = session.get(next_url, headers=headers, timeout=15)
+                        if resp.status_code != 200:
+                            st.sidebar.error(f"API Error {resp.status_code}: {resp.text[:200]}")
+                            break
+                        data = resp.json()
+                        stops = extract_bag_objects(data)
+
+                        for s in stops:
+                            bag_code = s.get("bag_code") or s.get("bag_number") or s.get("code") or s.get("tracking_number")
+                            if not bag_code:
+                                continue
+                            lat = s.get("latitude") or s.get("lat") or ""
+                            lon = s.get("longitude") or s.get("lng") or s.get("lon") or ""
+                            map_url = s.get("location_url_snapshot") or s.get("location_url") or s.get("map_url") or ""
+                            if not map_url and lat and lon:
+                                map_url = f"https://www.google.com/maps?q={lat},{lon}"
+                            area = s.get("area_snapshot") or s.get("emirate_snapshot") or "UAE Corridor"
+                            if "http" in str(area):
+                                area = "UAE Corridor"
+
+                            if bag_code not in extracted_map and (map_url or (lat and lon)):
+                                extracted_map[bag_code] = {
+                                    "Bag_Number": bag_code,
+                                    "Map_URL": map_url,
+                                    "Latitude": str(lat),
+                                    "Longitude": str(lon),
+                                    "Area": str(area),
+                                    "Bags": 1
+                                }
+
+                        nxt = (
+                            data.get("next")
+                            or (data.get("data") if isinstance(data.get("data"), dict) else {}).get("next")
+                            or (data.get("results") if isinstance(data.get("results"), dict) else {}).get("next")
+                        )
+                        next_url = nxt.replace("http://", "https://") if (isinstance(nxt, str) and nxt.startswith("http")) else None
+
+                    if extracted_map:
+                        st.session_state["api_raw_rows"] = list(extracted_map.values())
+                        st.session_state["api_sync_counter"] = st.session_state.get("api_sync_counter", 0) + 1
+                        st.sidebar.success(f"✅ Synced {len(extracted_map)} bags from location-board!")
+                    else:
+                        st.sidebar.warning("Connected to API, but 0 bags were returned.")
+                except Exception as e:
+                    st.sidebar.error(f"API Connection Error: {e}")
+
+    if "api_raw_rows" in st.session_state:
+        raw_rows = st.session_state["api_raw_rows"]
+        raw_bytes_len = len(raw_rows) + st.session_state.get("api_sync_counter", 0)
+        source_name = "live_location_board_api"
+        fieldnames = ["Bag_Number", "Map_URL", "Latitude", "Longitude", "Area", "Bags"]
+        bag_col = "Bag_Number"
 
 st.sidebar.markdown("### 👥 Driver Rotation Rules")
 far_yesterday_input = st.sidebar.multiselect(
@@ -924,8 +1127,8 @@ if not wh_lat:
     st.error("Failed to resolve warehouse coordinates from URL.")
     st.stop()
 
-if uploaded_file is None:
-    st.info("👋 Upload today's scraped `lion_delivery_all_bags.csv` in the sidebar to test the V2 Primary-First + Return Micro-Cluster engine.")
+if not raw_rows:
+    st.info("👋 Upload `lion_delivery_all_bags.csv` OR use **⚡ Live API Sync (location-board)** in the sidebar.")
     with st.expander("📊 View 7-Day Driver Rotation History"):
         hist_rows = [
             {
@@ -940,16 +1143,9 @@ if uploaded_file is None:
         st.table(hist_rows)
     st.stop()
 
-raw_bytes = uploaded_file.getvalue()
-content = raw_bytes.decode("utf-8-sig").splitlines()
-reader = csv.DictReader(content)
-raw_rows = list(reader)
-fieldnames = reader.fieldnames or []
-bag_col = fieldnames[0] if fieldnames else "Bag_Number"
-
 current_config_sig = (
-    uploaded_file.name,
-    len(raw_bytes),
+    source_name,
+    raw_bytes_len,
     target_drivers_input,
     max_bags_local_input,
     max_bags_distant_input,
@@ -968,10 +1164,10 @@ if (
 ):
     with st.spinner("Running V2 Primary-First Sequencing & Micro-Cluster Backfill..."):
         resolved, unresolvable, oman_stops = [], [], []
-        url_col = next((c for c in fieldnames if any(k in c.lower() for k in ["url", "link", "map", "location"])), None)
+        url_col = next((c for c in fieldnames if any(k in c.lower() for k in ["url", "link", "map", "location"])), "Map_URL")
 
         for row in raw_rows:
-            lat, lon = resolve_google_maps_url(row.get(url_col, ""))
+            lat, lon = extract_row_coordinates(row, url_col)
             if lat and lon:
                 if is_in_oman(lat, lon):
                     oman_stops.append({
@@ -993,7 +1189,7 @@ if (
                 unresolvable.append(row)
 
         if not resolved:
-            st.error("Could not resolve valid UAE coordinates from the uploaded CSV.")
+            st.error("Could not resolve valid UAE coordinates from the input data.")
             st.stop()
 
         all_coords = [(wh_lat, wh_lon)] + [(s["lat"], s["lon"]) for s in resolved]
@@ -1362,7 +1558,6 @@ if legend_chips:
     )
     m.get_root().html.add_child(folium.Element(bottom_bar_html))
 
-# Set collapsed=True so the driver checkboxes and map styles fold into a small icon button
 folium.LayerControl(collapsed=True, position="topright").add_to(m)
 st_folium(m, width="100%", height=750, returned_objects=[])
 
@@ -1370,10 +1565,12 @@ st_folium(m, width="100%", height=750, returned_objects=[])
 # 10. EXPORT & WHATSAPP CARDS
 # ==========================================
 out_fields = list(fieldnames) + [
-    "Assigned_Driver", "Driver_ID", "Stop_Sequence", "Stop_Phase", "City_Area",
-    "Warehouse_Road_KM", "Leg_Distance_KM", "Route_Total_Bags",
-    "Route_OneWay_KM", "Est_Finish_Time", "Est_Shift_Hours",
-    "Resolved_Lat", "Resolved_Lon", "Dispatch_Status"
+    f for f in [
+        "Assigned_Driver", "Driver_ID", "Stop_Sequence", "Stop_Phase", "City_Area",
+        "Warehouse_Road_KM", "Leg_Distance_KM", "Route_Total_Bags",
+        "Route_OneWay_KM", "Est_Finish_Time", "Est_Shift_Hours",
+        "Resolved_Lat", "Resolved_Lon", "Dispatch_Status"
+    ] if f not in fieldnames
 ]
 
 csv_buffer = io.StringIO()
