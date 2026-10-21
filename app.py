@@ -171,6 +171,8 @@ def is_in_oman(lat, lon):
 def identify_uae_city(lat, lon):
     if lon < 54.95:
         return "Abu Dhabi"
+    if 24.40 <= lat <= 24.55 and 55.20 <= lon <= 55.45:
+        return "Al Ain"
     if lon >= 55.95 and lat >= 24.70:
         return "Fujairah / East Coast"
     if lat < 24.35:
