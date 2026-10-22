@@ -444,8 +444,7 @@ def obtain_fresh_jwt_token(custom_login_url, email_or_user, password):
 
 def pull_all_location_board_bags(base_endpoint, bearer_token):
     """
-    Pulls ALL bags from location-board and scans every field of each JSON record
-    for shortened Google Maps links (maps.app.goo.gl) regardless of key name.
+    Pulls ALL bags from location-board (including bags that have blank coordinates in the portal).
     """
     clean_tok = bearer_token.replace("Bearer ", "").strip()
     headers = {
@@ -453,21 +452,26 @@ def pull_all_location_board_bags(base_endpoint, bearer_token):
         "accept": "application/json"
     }
 
-    def find_records(obj, found=None):
+    def extract_bag_objects(obj, found=None):
         if found is None:
             found = []
         if not obj or not isinstance(obj, (dict, list)):
             return found
         if isinstance(obj, list):
             for el in obj:
-                find_records(el, found)
+                extract_bag_objects(el, found)
             return found
-        raw_str = json.dumps(obj)
-        if re.search(r"LD-BAG-\d+", raw_str, re.I) and "results" not in obj and "data" not in obj and "items" not in obj:
-            found.append(obj)
+        target = obj.get("stop") if isinstance(obj.get("stop"), dict) else obj
+        has_code = (
+            target.get("bag_code")
+            or target.get("bag_number")
+            or (isinstance(target.get("code"), str) and "LD-BAG" in target.get("code"))
+        )
+        if has_code or target.get("tracking_number"):
+            found.append(target)
             return found
         for key in obj:
-            find_records(obj[key], found)
+            extract_bag_objects(obj[key], found)
         return found
 
     base_clean = base_endpoint.split("?")[0].strip()
@@ -482,52 +486,55 @@ def pull_all_location_board_bags(base_endpoint, bearer_token):
             break
 
         data = resp.json()
-        records = find_records(data)
-        if not records:
+        stops = extract_bag_objects(data)
+        if not stops:
             break
 
         added_this_page = 0
-        for rec in records:
-            s = rec.get("stop") if isinstance(rec.get("stop"), dict) else rec
-            rec_json_str = json.dumps(rec)
-
-            bag_match = re.search(r"LD-BAG-\d+", rec_json_str, re.I)
-            bag_code = s.get("bag_code") or s.get("bag_number") or (bag_match.group(0).upper() if bag_match else None)
+        for s in stops:
+            bag_code = s.get("bag_code") or s.get("bag_number") or s.get("code") or s.get("tracking_number")
             if not bag_code:
                 continue
 
-            lat = s.get("latitude") or rec.get("latitude") or s.get("lat") or rec.get("lat") or ""
-            lon = s.get("longitude") or rec.get("longitude") or s.get("lng") or rec.get("lng") or ""
+            lat = s.get("latitude") or s.get("lat") or ""
+            lon = s.get("longitude") or s.get("lng") or s.get("lon") or ""
+            map_url = s.get("location_url_snapshot") or s.get("location_url") or s.get("map_url") or ""
 
-            # Search the entire JSON record for any maps.app.goo.gl or google.com/maps link
-            url_match = re.search(
-                r"https?://(?:maps\.app\.goo\.gl/[^\s\"'\\]+|goo\.gl/maps/[^\s\"'\\]+|(?:www\.)?google\.com/maps[^\s\"'\\]+)",
-                rec_json_str,
-                re.I
-            )
-            map_url = url_match.group(0) if url_match else ""
+            # Check if a maps link was pasted into address, landmark, or notes
+            if not map_url:
+                for extra_field in ["address_snapshot", "landmark_snapshot", "notes", "area_snapshot"]:
+                    f_val = str(s.get(extra_field) or "")
+                    if "http" in f_val or "maps" in f_val:
+                        map_url = f_val.strip()
+                        break
+
             if not map_url and lat and lon:
                 map_url = f"https://www.google.com/maps?q={lat},{lon}"
 
             area_parts = [
-                str(s.get("area") or rec.get("area") or s.get("area_snapshot") or ""),
-                str(s.get("address") or rec.get("address") or s.get("address_snapshot") or ""),
-                str(s.get("emirate") or rec.get("emirate") or s.get("emirate_snapshot") or ""),
+                str(s.get("area_snapshot") or ""),
+                str(s.get("address_snapshot") or ""),
+                str(s.get("city_zone_snapshot") or ""),
+                str(s.get("emirate_snapshot") or ""),
             ]
-            clean_area = " - ".join(dict.fromkeys(p.strip() for p in area_parts if p.strip() and "http" not in p)) or "UAE Corridor"
+            clean_area_parts = [p.strip() for p in area_parts if p.strip() and "http" not in p]
+            area_str = " - ".join(dict.fromkeys(clean_area_parts)) if clean_area_parts else "UAE Corridor"
 
+            # Never skip a bag even if map_url and lat/lon are empty!
             if bag_code not in extracted_map:
                 extracted_map[bag_code] = {
                     "Bag_Number": str(bag_code),
                     "Map_URL": str(map_url),
                     "Latitude": str(lat),
                     "Longitude": str(lon),
-                    "Area": clean_area,
+                    "Area": area_str,
+                    "Customer": str(s.get("customer_name_snapshot") or ""),
+                    "Phone": str(s.get("customer_phone_snapshot") or ""),
                     "Bags": 1
                 }
                 added_this_page += 1
 
-        if added_this_page == 0 or len(records) < 100:
+        if added_this_page == 0 or len(stops) < 100:
             break
 
     return list(extracted_map.values()), None
