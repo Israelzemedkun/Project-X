@@ -15,7 +15,7 @@ import streamlit as st
 from streamlit_folium import st_folium
 
 # ==========================================
-# PAGE CONFIGURATION (VERSION 2.0)
+# PAGE CONFIGURATION
 # ==========================================
 st.set_page_config(
     page_title="Lion Delivery Dispatch v2.0",
@@ -39,6 +39,66 @@ FLEET_DRIVERS = [
 
 DISTANT_CITIES = {"Al Ain", "Abu Dhabi", "Fujairah / East Coast", "Ras Al Khaimah"}
 UAE_MASAFI_WAYPOINT = (25.3180, 56.1660)
+
+# Fallback coordinates when an order in the portal has an Area/Emirate name but no Google Maps pin
+UAE_AREA_FALLBACK_COORDS = {
+    "al ain": (24.2075, 55.7447),
+    "remah": (24.1528, 55.3019),
+    "shuwaib": (24.7380, 55.7843),
+    "sweihan": (24.4667, 55.3333),
+    "ruga": (24.4815, 55.3089),
+    "abu dhabi": (24.4539, 54.3773),
+    "shamkha": (24.3934, 54.7078),
+    "shakhbout": (24.3644, 54.6186),
+    "khalifa city": (24.4205, 54.5775),
+    "baniyas": (24.3036, 54.6342),
+    "mohammed bin zayed": (24.3540, 54.5380),
+    "mbz": (24.3540, 54.5380),
+    "mussafah": (24.3582, 54.5029),
+    "shahama": (24.5367, 54.6822),
+    "yas": (24.4950, 54.6050),
+    "saadiyat": (24.5400, 54.4300),
+    "fujairah": (25.1288, 56.3265),
+    "khor fakkan": (25.3392, 56.3419),
+    "kalba": (25.0742, 56.3553),
+    "dibba": (25.5925, 56.2617),
+    "hatta": (24.8051, 56.1206),
+    "mleiha": (25.1314, 55.8856),
+    "ras al khaimah": (25.7895, 55.9432),
+    "rak": (25.7895, 55.9432),
+    "umm al quwain": (25.5647, 55.5552),
+    "uaq": (25.5647, 55.5552),
+    "ajman": (25.4052, 55.5136),
+    "rawda": (25.3880, 55.5240),
+    "nuaimiya": (25.3900, 55.4600),
+    "jurf": (25.4320, 55.5450),
+    "al nahda": (25.2982, 55.3712),
+    "al khan": (25.3225, 55.3653),
+    "majaz": (25.3314, 55.3854),
+    "taawun": (25.3125, 55.3742),
+    "qasimia": (25.3468, 55.3948),
+    "muwaileh": (25.3117, 55.4578),
+    "rahmaniya": (25.3522, 55.5750),
+    "dhaid": (25.2881, 55.8814),
+    "sharjah": (25.3463, 55.4209),
+    "deira": (25.2711, 55.3275),
+    "bur dubai": (25.2532, 55.2972),
+    "warqa": (25.1972, 55.4144),
+    "mirdif": (25.2225, 55.4194),
+    "quasis": (25.2769, 55.3850),
+    "qusais": (25.2769, 55.3850),
+    "muhaisnah": (25.2750, 55.4090),
+    "barsha": (25.1028, 55.1953),
+    "jumeirah": (25.1916, 55.2428),
+    "marina": (25.0805, 55.1403),
+    "business bay": (25.1850, 55.2650),
+    "downtown": (25.1972, 55.2744),
+    "silicon oasis": (25.1215, 55.3773),
+    "international city": (25.1667, 55.4083),
+    "jvc": (25.0550, 55.2090),
+    "jebel ali": (24.9857, 55.0273),
+    "dubai": (25.2048, 55.2708),
+}
 
 DRIVER_COLORS = [
     "#e6194B",  # Red
@@ -173,23 +233,23 @@ def identify_uae_city(lat, lon):
         return "Abu Dhabi"
     if 24.40 <= lat <= 24.55 and 55.20 <= lon <= 55.45:
         return "Al Ain"
-    if lon >= 55.95 and lat >= 24.70:
+    if (lon >= 55.95 and lat >= 24.70) or (lon >= 55.80 and 24.80 <= lat < 25.58) or (lon >= 56.12 and lat >= 25.58):
         return "Fujairah / East Coast"
     if lat < 24.35:
         return "Al Ain"
-    if lat < 24.82 and 55.35 <= lon < 55.95:
+    if lat < 24.80 and 55.35 <= lon < 55.95:
         return "Al Ain"
-    if 24.82 <= lat < 25.02 and 55.55 <= lon < 55.95:
+    if 24.80 <= lat < 25.02 and 55.55 <= lon < 55.80:
         return "Al Ain"
-    if lon < 54.95 or (lat < 24.80 and lon < 55.35):
+    if lat < 24.80 and lon < 55.35:
         return "Abu Dhabi"
-    if lat >= 25.62 and 55.70 <= lon < 56.15:
+    if lat >= 25.58 and 55.70 <= lon < 56.12:
         return "Ras Al Khaimah"
-    if 25.48 <= lat < 25.62 and 55.50 <= lon < 55.85:
+    if 25.48 <= lat < 25.62 and 55.50 <= lon < 55.80:
         return "Umm Al Quwain"
     if 25.365 <= lat < 25.48 and 55.40 <= lon <= 55.63:
         return "Ajman"
-    if 25.25 <= lat < 25.48 and 55.34 <= lon < 55.95:
+    if 25.25 <= lat < 25.48 and 55.34 <= lon < 55.80:
         if lat < 25.325 and lon < 55.475:
             return "Sharjah (Near Dubai)"
         return "Sharjah (North / Inland)"
@@ -199,7 +259,7 @@ def identify_uae_city(lat, lon):
 
 
 # ==========================================
-# 3. URL RESOLUTION, AUTO-LOGIN API & OSRM MATRICES
+# 3. URL RESOLUTION, AREA GEOCODER & LIVE API
 # ==========================================
 @st.cache_data(show_spinner=False)
 def resolve_google_maps_url(url):
@@ -214,6 +274,7 @@ def resolve_google_maps_url(url):
         r"/search/(-?\d+\.\d+)\s*,\s*[+]?(-?\d+\.\d+)",
         r"@(-?\d+\.\d+)\s*,\s*(-?\d+\.\d+)",
         r"center=(-?\d+\.\d+)%2C(-?\d+\.\d+)",
+        r"(-?\d{2}\.\d{4,})\s*,\s*(5\d\.\d{4,})",
     ]
     for pat in patterns:
         match = re.search(pat, unquoted)
@@ -222,22 +283,55 @@ def resolve_google_maps_url(url):
             if -90 <= lat <= 90 and -180 <= lon <= 180:
                 return lat, lon
 
-    try:
-        resp = session.get(unquoted, allow_redirects=True, timeout=12)
-        final_url = urllib.parse.unquote(resp.url)
-        for pat in patterns:
-            match = re.search(pat, final_url)
-            if match:
-                lat, lon = float(match.group(1)), float(match.group(2))
-                if -90 <= lat <= 90 and -180 <= lon <= 180:
-                    return lat, lon
+    if unquoted.startswith("http"):
+        try:
+            resp = session.get(unquoted, allow_redirects=True, timeout=12)
+            final_url = urllib.parse.unquote(resp.url)
+            for pat in patterns:
+                match = re.search(pat, final_url)
+                if match:
+                    lat, lon = float(match.group(1)), float(match.group(2))
+                    if -90 <= lat <= 90 and -180 <= lon <= 180:
+                        return lat, lon
 
-        for pat in patterns:
-            match = re.search(pat, resp.text)
-            if match:
-                lat, lon = float(match.group(1)), float(match.group(2))
-                if -90 <= lat <= 90 and -180 <= lon <= 180:
-                    return lat, lon
+            for pat in patterns:
+                match = re.search(pat, resp.text)
+                if match:
+                    lat, lon = float(match.group(1)), float(match.group(2))
+                    if -90 <= lat <= 90 and -180 <= lon <= 180:
+                        return lat, lon
+        except Exception:
+            pass
+
+    return None, None
+
+
+@st.cache_data(show_spinner=False)
+def geocode_uae_text_fallback(area_text):
+    """
+    When a bag in the portal has no coordinates and no Google Maps link,
+    resolve its Area / Address / Emirate text so the bag is never dropped.
+    """
+    if not area_text:
+        return None, None
+
+    cleaned = str(area_text).lower().replace("_", " ").strip()
+    if cleaned in ("", "uae corridor", "none", "null"):
+        return None, None
+
+    # 1. Check built-in UAE area dictionary first (instant)
+    for key, (lat, lon) in UAE_AREA_FALLBACK_COORDS.items():
+        if key in cleaned:
+            return lat, lon
+
+    # 2. Query OpenStreetMap Nominatim restricted to UAE
+    try:
+        q = urllib.parse.quote(f"{area_text}, United Arab Emirates")
+        nom_url = f"https://nominatim.openstreetmap.org/search?q={q}&countrycodes=ae&format=json&limit=1"
+        resp = requests.get(nom_url, headers={"User-Agent": "LionDeliveryDispatch/2.0"}, timeout=6)
+        if resp.status_code == 200 and resp.json():
+            hit = resp.json()[0]
+            return float(hit["lat"]), float(hit["lon"])
     except Exception:
         pass
 
@@ -245,22 +339,54 @@ def resolve_google_maps_url(url):
 
 
 def extract_row_coordinates(row, url_col):
+    """
+    Returns (lat, lon, is_fallback_pin):
+      1. Direct Latitude / Longitude columns
+      2. Google Maps URL in Map_URL (or hidden in any other column)
+      3. Area / Address / Emirate text fallback geocoding
+    """
     lat_val = row.get("Latitude") or row.get("latitude") or row.get("Lat")
     lon_val = row.get("Longitude") or row.get("longitude") or row.get("Lon")
     if lat_val and lon_val:
         try:
             lat_f = float(str(lat_val).strip().strip("'"))
             lon_f = float(str(lon_val).strip().strip("'"))
-            if -90 <= lat_f <= 90 and -180 <= lon_f <= 180:
-                return lat_f, lon_f
+            if 22.0 <= lat_f <= 27.0 and 51.0 <= lon_f <= 57.0:
+                return lat_f, lon_f, False
         except ValueError:
             pass
 
-    return resolve_google_maps_url(row.get(url_col, ""))
+    # Check Map_URL column first
+    lat, lon = resolve_google_maps_url(row.get(url_col, ""))
+    if lat and lon:
+        return lat, lon, False
+
+    # Scan all other fields in case a Google Maps link or coordinate pair was put in Address/Area/Notes
+    for val in row.values():
+        if val and ("http" in str(val) or "maps" in str(val) or re.search(r"2[345]\.\d{4,}", str(val))):
+            lat, lon = resolve_google_maps_url(str(val))
+            if lat and lon:
+                return lat, lon, False
+
+    # Fallback: Geocode using Area / Address / Emirate text
+    area_candidates = [
+        row.get("Area", ""),
+        row.get("Address", ""),
+        row.get("Emirate", ""),
+        row.get("area_snapshot", ""),
+        row.get("address_snapshot", ""),
+        row.get("emirate_snapshot", ""),
+        row.get("city_zone_snapshot", ""),
+    ]
+    combined_area = " ".join(str(x) for x in area_candidates if x and "http" not in str(x)).strip()
+    lat, lon = geocode_uae_text_fallback(combined_area)
+    if lat and lon:
+        return lat, lon, True
+
+    return None, None, True
 
 
 def find_access_jwt_in_response(obj):
-    """Recursively scan any JSON login response to extract the SimpleJWT 'access' token."""
     raw_text = json.dumps(obj)
     matches = re.findall(r"eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+", raw_text)
     fallback_jwt = None
@@ -278,10 +404,6 @@ def find_access_jwt_in_response(obj):
 
 
 def obtain_fresh_jwt_token(custom_login_url, email_or_user, password):
-    """
-    Automatically authenticate against api.liondelivery.ae to get a fresh 15-min access token.
-    Tests the provided login URL plus standard Django REST / SimpleJWT endpoints.
-    """
     candidate_urls = []
     if custom_login_url and custom_login_url.strip():
         candidate_urls.append(custom_login_url.strip())
@@ -321,7 +443,9 @@ def obtain_fresh_jwt_token(custom_login_url, email_or_user, password):
 
 
 def pull_all_location_board_bags(base_endpoint, bearer_token):
-    """Loop through page=1, 2, 3... on location-board just like the Tampermonkey exporter."""
+    """
+    Pulls ALL bags from location-board (including bags that have blank coordinates in the portal).
+    """
     clean_tok = bearer_token.replace("Bearer ", "").strip()
     headers = {
         "authorization": f"Bearer {clean_tok}",
@@ -343,7 +467,7 @@ def pull_all_location_board_bags(base_endpoint, bearer_token):
             or target.get("bag_number")
             or (isinstance(target.get("code"), str) and "LD-BAG" in target.get("code"))
         )
-        if has_code or (target.get("latitude") and target.get("longitude") and target.get("tracking_number")):
+        if has_code or target.get("tracking_number"):
             found.append(target)
             return found
         for key in obj:
@@ -371,22 +495,41 @@ def pull_all_location_board_bags(base_endpoint, bearer_token):
             bag_code = s.get("bag_code") or s.get("bag_number") or s.get("code") or s.get("tracking_number")
             if not bag_code:
                 continue
+
             lat = s.get("latitude") or s.get("lat") or ""
             lon = s.get("longitude") or s.get("lng") or s.get("lon") or ""
             map_url = s.get("location_url_snapshot") or s.get("location_url") or s.get("map_url") or ""
+
+            # Check if a maps link was pasted into address, landmark, or notes
+            if not map_url:
+                for extra_field in ["address_snapshot", "landmark_snapshot", "notes", "area_snapshot"]:
+                    f_val = str(s.get(extra_field) or "")
+                    if "http" in f_val or "maps" in f_val:
+                        map_url = f_val.strip()
+                        break
+
             if not map_url and lat and lon:
                 map_url = f"https://www.google.com/maps?q={lat},{lon}"
-            area = s.get("area_snapshot") or s.get("emirate_snapshot") or s.get("city_zone_snapshot") or "UAE Corridor"
-            if "http" in str(area):
-                area = "UAE Corridor"
 
-            if bag_code not in extracted_map and (map_url or (lat and lon)):
+            area_parts = [
+                str(s.get("area_snapshot") or ""),
+                str(s.get("address_snapshot") or ""),
+                str(s.get("city_zone_snapshot") or ""),
+                str(s.get("emirate_snapshot") or ""),
+            ]
+            clean_area_parts = [p.strip() for p in area_parts if p.strip() and "http" not in p]
+            area_str = " - ".join(dict.fromkeys(clean_area_parts)) if clean_area_parts else "UAE Corridor"
+
+            # Never skip a bag even if map_url and lat/lon are empty!
+            if bag_code not in extracted_map:
                 extracted_map[bag_code] = {
                     "Bag_Number": str(bag_code),
                     "Map_URL": str(map_url),
                     "Latitude": str(lat),
                     "Longitude": str(lon),
-                    "Area": str(area),
+                    "Area": area_str,
+                    "Customer": str(s.get("customer_name_snapshot") or ""),
+                    "Phone": str(s.get("customer_phone_snapshot") or ""),
                     "Bags": 1
                 }
                 added_this_page += 1
@@ -1064,7 +1207,7 @@ data_source = st.sidebar.radio(
 )
 
 raw_rows = []
-fieldnames = ["Bag_Number", "Map_URL", "Latitude", "Longitude", "Area", "Bags"]
+fieldnames = ["Bag_Number", "Map_URL", "Latitude", "Longitude", "Area", "Customer", "Phone", "Bags"]
 bag_col = "Bag_Number"
 source_name = "manual_csv"
 raw_bytes_len = 0
@@ -1134,7 +1277,7 @@ else:
                 elif pulled_rows:
                     st.session_state["api_raw_rows"] = pulled_rows
                     st.session_state["api_sync_counter"] = st.session_state.get("api_sync_counter", 0) + 1
-                    st.sidebar.success(f"✅ Synced {len(pulled_rows)} live bags from location-board!")
+                    st.sidebar.success(f"✅ Synced ALL {len(pulled_rows)} bags from location-board!")
                 else:
                     st.sidebar.warning("Connected successfully, but 0 bags are currently on the location-board.")
 
@@ -1142,7 +1285,7 @@ else:
         raw_rows = st.session_state["api_raw_rows"]
         raw_bytes_len = len(raw_rows) + st.session_state.get("api_sync_counter", 0)
         source_name = "live_location_board_api"
-        fieldnames = ["Bag_Number", "Map_URL", "Latitude", "Longitude", "Area", "Bags"]
+        fieldnames = ["Bag_Number", "Map_URL", "Latitude", "Longitude", "Area", "Customer", "Phone", "Bags"]
         bag_col = "Bag_Number"
 
 st.sidebar.markdown("### 👥 Driver Rotation Rules")
@@ -1208,12 +1351,12 @@ if (
     or st.session_state.get("config_sig") != current_config_sig
     or force_rerun
 ):
-    with st.spinner("Running V2 Primary-First Sequencing & Micro-Cluster Backfill..."):
+    with st.spinner("Running V2 Primary-First Sequencing & Area Fallback Geocoding..."):
         resolved, unresolvable, oman_stops = [], [], []
         url_col = next((c for c in fieldnames if any(k in c.lower() for k in ["url", "link", "map", "location"])), "Map_URL")
 
         for row in raw_rows:
-            lat, lon = extract_row_coordinates(row, url_col)
+            lat, lon, is_fallback = extract_row_coordinates(row, url_col)
             if lat and lon:
                 if is_in_oman(lat, lon):
                     oman_stops.append({
@@ -1221,7 +1364,8 @@ if (
                         "lat": lat,
                         "lon": lon,
                         "city": "Oman Territory / Border",
-                        "bags": int(float(row.get("Bags", 1) or 1))
+                        "bags": int(float(row.get("Bags", 1) or 1)),
+                        "is_fallback": is_fallback
                     })
                 else:
                     resolved.append({
@@ -1229,7 +1373,8 @@ if (
                         "lat": lat,
                         "lon": lon,
                         "bags": int(float(row.get("Bags", 1) or 1)),
-                        "city": identify_uae_city(lat, lon)
+                        "city": identify_uae_city(lat, lon),
+                        "is_fallback": is_fallback
                     })
             else:
                 unresolvable.append(row)
@@ -1288,6 +1433,7 @@ if (
                     if (not has_distant_in_route or stop["city"] in DISTANT_CITIES)
                     else "Return-Leg Cluster"
                 )
+                status_str = "ASSIGNED_AREA_FALLBACK_NO_PIN" if stop.get("is_fallback") else "ASSIGNED_630AM"
                 item = dict(stop["row_data"])
                 item.update({
                     "Assigned_Driver": d_name,
@@ -1301,7 +1447,7 @@ if (
                     "Route_OneWay_KM": round(total_km, 2),
                     "Resolved_Lat": round(stop["lat"], 6),
                     "Resolved_Lon": round(stop["lon"], 6),
-                    "Dispatch_Status": "ASSIGNED_630AM"
+                    "Dispatch_Status": status_str
                 })
                 route_temp_rows.append(item)
 
@@ -1351,6 +1497,27 @@ if (
             })
             final_rows.append(item)
 
+        # Keep any completely unresolvable rows visible so no bag out of 82 is ever lost
+        for bad_row in unresolvable:
+            item = dict(bad_row)
+            item.update({
+                "Assigned_Driver": "UNASSIGNED",
+                "Driver_ID": "NOT GOING - MISSING PIN & AREA",
+                "Stop_Sequence": "",
+                "Stop_Phase": "Missing Location",
+                "City_Area": str(bad_row.get("Area") or "Unknown"),
+                "Warehouse_Road_KM": "",
+                "Leg_Distance_KM": "",
+                "Route_Total_Bags": "",
+                "Route_OneWay_KM": "",
+                "Est_Finish_Time": "",
+                "Est_Shift_Hours": "",
+                "Resolved_Lat": round(wh_lat, 6),
+                "Resolved_Lon": round(wh_lon, 6),
+                "Dispatch_Status": "MISSING_COORDINATES_IN_PORTAL"
+            })
+            final_rows.append(item)
+
         st.session_state["dispatch_data"] = final_rows
         st.session_state["config_sig"] = current_config_sig
 
@@ -1370,12 +1537,30 @@ for r in master_rows:
 resting_drivers_today = [d for d in FLEET_DRIVERS if d not in active_named_drivers]
 total_bags_assigned = sum(int(float(r.get("Bags", 1) or 1)) for r in master_rows if "NOT GOING" not in r["Driver_ID"])
 excluded_bags = [r for r in master_rows if "NOT GOING" in r["Driver_ID"]]
+no_pin_bags = [
+    r for r in master_rows
+    if r.get("Dispatch_Status") in ("ASSIGNED_AREA_FALLBACK_NO_PIN", "MISSING_COORDINATES_IN_PORTAL")
+]
 
 kpi1, kpi2, kpi3, kpi4 = st.columns(4)
 kpi1.metric("Active Drivers", f"{len(active_driver_ids)} / 7")
-kpi2.metric("Total Bags Assigned", total_bags_assigned)
+kpi2.metric("Total Bags Assigned", f"{total_bags_assigned} / {len(master_rows)}")
 kpi3.metric("Resting Drivers", ", ".join(resting_drivers_today) if resting_drivers_today else "None")
-kpi4.metric(f"Excluded (>{int(max_dist_input)}km / Oman)", len(excluded_bags))
+kpi4.metric("Missing Exact Pin / Excluded", f"{len(no_pin_bags)} No-Pin | {len(excluded_bags)} Excl.")
+
+if no_pin_bags:
+    with st.expander(f"⚠️ {len(no_pin_bags)} Bag(s) Had No Exact Coordinate Pin in Portal (Auto-Placed by Area Name)", expanded=True):
+        st.table([
+            {
+                "Bag Code": r.get(bag_col, ""),
+                "Portal Area / Address": r.get("Area", ""),
+                "Customer": r.get("Customer", ""),
+                "Phone": r.get("Phone", ""),
+                "Assigned To": r.get("Driver_ID", ""),
+                "Stop #": r.get("Stop_Sequence", "-")
+            }
+            for r in no_pin_bags
+        ])
 
 # ==========================================
 # 8. MANUAL CONTROLS
@@ -1525,7 +1710,8 @@ for d_idx, d_name in enumerate(active_driver_ids):
         disp_lon = raw_lon + (dup_count * 0.00014)
 
         phase_str = s.get("Stop_Phase", "Primary City")
-        border_style = "2px dashed #ffeb3b" if phase_str == "Return-Leg Cluster" else "2px solid #fff"
+        is_area_fb = s.get("Dispatch_Status") == "ASSIGNED_AREA_FALLBACK_NO_PIN"
+        border_style = "2px dotted #ff1744" if is_area_fb else ("2px dashed #ffeb3b" if phase_str == "Return-Leg Cluster" else "2px solid #fff")
 
         pin_url = f"https://www.google.com/maps?q={raw_lat},{raw_lon}"
         badge_html = (
@@ -1536,12 +1722,13 @@ for d_idx, d_name in enumerate(active_driver_ids):
             f'{s["Stop_Sequence"]}</div>'
         )
         badge = folium.DivIcon(html=badge_html, icon_size=(24, 24), icon_anchor=(12, 12))
+        fb_note = "<br><b style='color:#d50000;'>⚠️ Area-Only Pin (No Exact Coords in Portal)</b>" if is_area_fb else ""
         popup_html = (
             f'<div style="font-family:Arial,sans-serif; font-size:12px; min-width:200px;">'
-            f'<b>{d_name} — Stop #{s["Stop_Sequence"]}</b><br>'
+            f'<b>{d_name} — Stop #{s["Stop_Sequence"]}</b>{fb_note}<br>'
             f'<b>Phase:</b> {phase_str}<br>'
             f'<b>Bag:</b> {s.get(bag_col, "")}<br>'
-            f'<b>Area:</b> {s.get("City_Area", "")}<br>'
+            f'<b>Area:</b> {s.get("Area", s.get("City_Area", ""))}<br>'
             f'<b>From WH:</b> {s.get("Warehouse_Road_KM", "")} km (+{s.get("Leg_Distance_KM", "")} km leg)<br>'
             f'<b>Est. Finish:</b> {s.get("Est_Finish_Time", "")}<br>'
             f'<a href="{pin_url}" target="_blank" style="color:#1a73e8; font-weight:bold;">Open Pin ↗</a> | '
@@ -1551,7 +1738,7 @@ for d_idx, d_name in enumerate(active_driver_ids):
         folium.Marker(
             location=[disp_lat, disp_lon],
             popup=folium.Popup(popup_html, max_width=280),
-            tooltip=f"{s.get(bag_col, '')} • Stop #{s['Stop_Sequence']} ({phase_str}) • {s.get('City_Area', '')}",
+            tooltip=f"{s.get(bag_col, '')} • Stop #{s['Stop_Sequence']} ({phase_str}) • {s.get('Area', s.get('City_Area', ''))}",
             icon=badge
         ).add_to(fg)
 
@@ -1572,7 +1759,7 @@ if selected_driver_filter == "Show All Drivers" and excluded_bags:
         route_coords_for_bounds.append((lat, lon))
         is_om = "OMAN" in ex_stop["Driver_ID"]
         icon_color = "#e65100" if is_om else "#212121"
-        label = "OUTSIDE UAE (OMAN)" if is_om else f"TOO FAR ({ex_stop.get('Warehouse_Road_KM', '>240')} km)"
+        label = "OUTSIDE UAE (OMAN)" if is_om else f"EXCLUDED ({ex_stop.get('Driver_ID', '')})"
         warn_html = (
             f'<div style="background:{icon_color}; color:#fff; border-radius:50%; '
             f'width:24px; height:24px; text-align:center; font-weight:bold; '
@@ -1581,7 +1768,7 @@ if selected_driver_filter == "Show All Drivers" and excluded_bags:
         warn_badge = folium.DivIcon(html=warn_html, icon_size=(24, 24), icon_anchor=(12, 12))
         folium.Marker(
             location=[lat, lon],
-            popup=f"<b>🚫 {label}</b><br>Bag: {ex_stop.get(bag_col, '')}",
+            popup=f"<b>🚫 {label}</b><br>Bag: {ex_stop.get(bag_col, '')}<br>Area: {ex_stop.get('Area', '')}",
             tooltip=f"🚫 {label}: {ex_stop.get(bag_col, '')}",
             icon=warn_badge
         ).add_to(ex_fg)
