@@ -229,32 +229,52 @@ def is_in_oman(lat, lon):
 
 
 def identify_uae_city(lat, lon):
+    # 1. Strictly Abu Dhabi for western coordinates
     if lon < 54.95:
         return "Abu Dhabi"
+
+    # 2. Specific Ruga / Sweihan eastern corridor -> Al Ain
     if 24.40 <= lat <= 24.55 and 55.20 <= lon <= 55.45:
         return "Al Ain"
-    if (lon >= 55.95 and lat >= 24.70) or (lon >= 55.80 and 24.80 <= lat < 25.58) or (lon >= 56.12 and lat >= 25.58):
+
+    # 3. Fujairah, East Coast, Hatta, Mleiha, Fili & E102 Corridor (includes 25.028431, 55.843082)
+    if (lon >= 55.72 and 24.78 <= lat < 25.58) or (lon >= 55.95 and lat >= 24.60) or (lon >= 56.12 and lat >= 25.58):
         return "Fujairah / East Coast"
+
+    # 4. Al Ain City + Deep South (< 24.35) + Al Shuwaib / Al Faqa (< 24.78)
     if lat < 24.35:
         return "Al Ain"
-    if lat < 24.80 and 55.35 <= lon < 55.95:
+    if lat < 24.78 and 55.35 <= lon < 55.95:
         return "Al Ain"
-    if 24.80 <= lat < 25.02 and 55.55 <= lon < 55.80:
+    if 24.78 <= lat < 25.02 and 55.55 <= lon < 55.72:
         return "Al Ain"
+
+    # 5. Rest of Abu Dhabi
     if lat < 24.80 and lon < 55.35:
         return "Abu Dhabi"
+
+    # 6. Ras Al Khaimah
     if lat >= 25.58 and 55.70 <= lon < 56.12:
         return "Ras Al Khaimah"
-    if 25.48 <= lat < 25.62 and 55.50 <= lon < 55.80:
+
+    # 7. Umm Al Quwain
+    if 25.48 <= lat < 25.62 and 55.50 <= lon < 55.72:
         return "Umm Al Quwain"
+
+    # 8. Ajman
     if 25.365 <= lat < 25.48 and 55.40 <= lon <= 55.63:
         return "Ajman"
-    if 25.25 <= lat < 25.48 and 55.34 <= lon < 55.80:
+
+    # 9. Sharjah (Near Dubai vs North / Inland)
+    if 25.25 <= lat < 25.48 and 55.34 <= lon < 55.72:
         if lat < 25.325 and lon < 55.475:
             return "Sharjah (Near Dubai)"
         return "Sharjah (North / Inland)"
+
+    # 10. Dubai
     if 24.80 <= lat < 25.32 and 54.95 <= lon <= 55.65:
         return "Dubai"
+
     return "Sharjah (North / Inland)"
 
 
@@ -727,67 +747,29 @@ def are_cities_compatible_v2(cities_a, cities_b, allow_fuj_rak_combo=False):
     comb = cities_a | cities_b
     distant_in_comb = comb & DISTANT_CITIES
 
+    # Never combine Fujairah / East Coast with Al Ain, Abu Dhabi, or Dubai
+    if "Fujairah / East Coast" in comb:
+        if comb & {"Al Ain", "Abu Dhabi", "Dubai", "Sharjah (Near Dubai)"}:
+            return False
+
     if len(distant_in_comb) > 1:
         if not (allow_fuj_rak_combo and distant_in_comb == {"Fujairah / East Coast", "Ras Al Khaimah"}):
             return False
 
-    if distant_in_comb & {"Fujairah / East Coast", "Ras Al Khaimah"}:
+    if "Ras Al Khaimah" in comb:
         if comb & {"Dubai", "Sharjah (Near Dubai)", "Abu Dhabi", "Al Ain"}:
             return False
 
-    has_north = bool(comb & {"Ras Al Khaimah", "Umm Al Quwain"})
+    has_north = bool(comb & {"Ras Al Khaimah", "Umm Al Quwain", "Fujairah / East Coast"})
     has_south = bool(comb & {"Dubai", "Abu Dhabi", "Al Ain", "Sharjah (Near Dubai)"})
     if has_north and has_south:
         return False
 
     if "Abu Dhabi" in comb:
-        if comb & {"Ajman", "Umm Al Quwain", "Sharjah (North / Inland)"}:
+        if comb & {"Ajman", "Umm Al Quwain", "Sharjah (North / Inland)", "Fujairah / East Coast", "Ras Al Khaimah"}:
             return False
 
     return True
-
-
-def extract_micro_cluster(candidate_nodes, demand_list, dist_matrix, anchor_node, max_bags_to_add, max_radius_km=4.5):
-    if not candidate_nodes or max_bags_to_add <= 0:
-        return []
-
-    best_cluster = []
-    best_score = float("inf")
-
-    for seed in candidate_nodes:
-        if demand_list[seed - 1] > max_bags_to_add:
-            continue
-
-        neighbors = sorted(
-            [n for n in candidate_nodes if n != seed],
-            key=lambda n: max(dist_matrix[seed][n], dist_matrix[n][seed])
-        )
-
-        cluster = [seed]
-        cluster_bags = demand_list[seed - 1]
-        spread_km = 0.0
-
-        for nb in neighbors:
-            d_seed = max(dist_matrix[seed][nb], dist_matrix[nb][seed])
-            if d_seed > max_radius_km:
-                break
-            nb_bags = demand_list[nb - 1]
-            if cluster_bags + nb_bags <= max_bags_to_add:
-                cluster.append(nb)
-                cluster_bags += nb_bags
-                spread_km = max(spread_km, d_seed)
-            if cluster_bags == max_bags_to_add:
-                break
-
-        dist_from_anchor = dist_matrix[anchor_node][seed]
-        shortfall_penalty = (max_bags_to_add - cluster_bags) * 18.0
-        score = (spread_km * 4.0) + (dist_from_anchor * 0.25) + shortfall_penalty
-
-        if score < best_score:
-            best_score = score
-            best_cluster = cluster
-
-    return best_cluster
 
 
 def build_v2_morning_routes(
@@ -805,6 +787,7 @@ def build_v2_morning_routes(
 
     demand_list = [s["bags"] for s in valid_stops]
     city_list = [s["city"] for s in valid_stops]
+    lon_list = [s["lon"] for s in valid_stops]
 
     def route_bags(r):
         return sum(demand_list[n - 1] for n in r)
@@ -843,6 +826,7 @@ def build_v2_morning_routes(
             if chunk:
                 distant_routes.append(chunk)
 
+    # Combine Fujairah + RAK only if one of them is below min_driver_bags and combined <= max_distant_bags
     fuj_routes = [r for r in distant_routes if route_cities(r) == {"Fujairah / East Coast"}]
     rak_routes = [r for r in distant_routes if route_cities(r) == {"Ras Al Khaimah"}]
 
@@ -855,16 +839,16 @@ def build_v2_morning_routes(
             combined_fr, _ = optimize_route_order(f_r + r_r, dist_matrix, city_list)
             distant_routes.append(combined_fr)
 
+    # Check if Local Drivers are actually overloaded (too many packages for local drivers)
     remaining_local_driver_slots = max(1, target_drivers - len(distant_routes))
+    local_driver_capacity = remaining_local_driver_slots * max_local_bags
 
     def distant_backfill_priority(r):
         rc = route_cities(r)
+        if "Fujairah / East Coast" in rc or "Ras Al Khaimah" in rc:
+            return 0  # If Fujairah/RAK has very few bags, let it pair with Northern Sharjah/Ajman first
         if "Al Ain" in rc:
-            return 0
-        if "Abu Dhabi" in rc:
             return 1
-        if len(rc & {"Fujairah / East Coast", "Ras Al Khaimah"}) == 2:
-            return 3
         return 2
 
     distant_routes.sort(key=distant_backfill_priority)
@@ -872,37 +856,48 @@ def build_v2_morning_routes(
     for d_route in distant_routes:
         curr_bags = route_bags(d_route)
         rc = route_cities(d_route)
-        is_combined_fr = len(rc & {"Fujairah / East Coast", "Ras Al Khaimah"}) == 2
-
         local_bags_left = sum(demand_list[n - 1] for n in local_pool)
-        local_pressure = local_bags_left > (remaining_local_driver_slots * (max_local_bags - 3))
+        local_overflow = max(0, local_bags_left - local_driver_capacity)
 
-        if is_combined_fr and not local_pressure and curr_bags >= min_driver_bags:
-            continue
+        # STRICT BACKFILL RULE:
+        # 1. Al Ain and Abu Dhabi ONLY take backfills if local drivers have too many bags (local_overflow > 0).
+        # 2. Fujairah / RAK only takes northern return bags if local_overflow > 0 OR if Fujairah/RAK has < min_driver_bags.
+        if ("Al Ain" in rc or "Abu Dhabi" in rc):
+            if local_overflow <= 0:
+                continue
+            bags_needed = min(local_overflow, max(0, max_distant_bags - curr_bags))
+        else:
+            # Fujairah / RAK
+            if local_overflow > 0:
+                bags_needed = min(local_overflow, max(0, max_distant_bags - curr_bags))
+            elif curr_bags < min_driver_bags:
+                bags_needed = min_driver_bags - curr_bags
+            else:
+                continue
 
-        target_cap_for_this_driver = max_distant_bags if (local_pressure or curr_bags < max_distant_bags) else min_driver_bags
-        if is_combined_fr:
-            target_cap_for_this_driver = min(max_distant_bags, max(curr_bags, min_driver_bags + 2))
-
-        bags_needed = max(0, target_cap_for_this_driver - curr_bags)
-        if bags_needed == 0 or not local_pool:
+        if bags_needed <= 0 or not local_pool:
             continue
 
         if "Abu Dhabi" in rc:
-            eligible = [n for n in local_pool if city_list[n - 1] in {"Dubai", "Sharjah (Near Dubai)"}]
+            # Strictly western Dubai / Sharjah Near Dubai (never east of 55.55)
+            eligible = [
+                n for n in local_pool
+                if city_list[n - 1] in {"Dubai", "Sharjah (Near Dubai)"} and lon_list[n - 1] < 55.55
+            ]
             radius = 4.0
         elif "Al Ain" in rc:
+            # Strictly coastal/urban Sharjah or Dubai (never east of 55.58, never Fujairah/Mleiha corridor)
             eligible = [
                 n for n in local_pool
-                if city_list[n - 1] in {"Sharjah (Near Dubai)", "Sharjah (North / Inland)", "Ajman"}
+                if city_list[n - 1] in {"Sharjah (Near Dubai)", "Sharjah (North / Inland)", "Dubai"}
+                and lon_list[n - 1] < 55.58
             ]
-            if not eligible:
-                eligible = [n for n in local_pool if city_list[n - 1] == "Dubai"]
             radius = 4.5
         else:
+            # Fujairah / East Coast / RAK can backfill along northern return corridor (Sharjah North / Ajman / UAQ)
             eligible = [
                 n for n in local_pool
-                if city_list[n - 1] in {"Ajman", "Umm Al Quwain", "Sharjah (North / Inland)"}
+                if city_list[n - 1] in {"Sharjah (North / Inland)", "Ajman", "Umm Al Quwain"}
             ]
             radius = 5.0
 
@@ -924,21 +919,6 @@ def build_v2_morning_routes(
         for n in micro_cluster:
             d_route.append(n)
             local_pool.remove(n)
-
-        if route_bags(d_route) < min_driver_bags and local_pool:
-            still_needed = min_driver_bags - route_bags(d_route)
-            eligible_2 = [n for n in eligible if n in local_pool]
-            extra_cluster = extract_micro_cluster(
-                candidate_nodes=eligible_2,
-                demand_list=demand_list,
-                dist_matrix=dist_matrix,
-                anchor_node=d_route[-1],
-                max_bags_to_add=still_needed,
-                max_radius_km=radius + 3.0
-            )
-            for n in extra_cluster:
-                d_route.append(n)
-                local_pool.remove(n)
 
     local_routes = [[n] for n in local_pool]
 
@@ -995,11 +975,18 @@ def build_v2_morning_routes(
 
     all_routes = distant_routes + local_routes
 
+    # Small-route cleanup: NEVER dissolve a distant route into Al Ain or Abu Dhabi,
+    # and NEVER add local stops to Al Ain / Abu Dhabi unless local routes are full.
     changed = True
     while changed and len(all_routes) > 1:
         changed = False
         all_routes.sort(key=lambda r: route_bags(r))
         smallest = all_routes[0]
+        smallest_cities = route_cities(smallest)
+
+        # Never break up an Al Ain, Abu Dhabi, or Fujairah route into other routes
+        if smallest_cities & {"Al Ain", "Abu Dhabi", "Fujairah / East Coast"}:
+            break
 
         if route_bags(smallest) < min_driver_bags:
             temp = [list(r) for r in all_routes[1:]]
@@ -1009,6 +996,9 @@ def build_v2_morning_routes(
                 n_city = {city_list[node - 1]}
                 for idx, t_r in enumerate(temp):
                     t_cities = route_cities(t_r)
+                    # Do not push leftover local bags into Al Ain or Abu Dhabi if any local route has space
+                    if t_cities & {"Al Ain", "Abu Dhabi"}:
+                        continue
                     is_t_distant = bool(t_cities & DISTANT_CITIES)
                     cap = max_distant_bags if (is_t_distant and not (n_city & DISTANT_CITIES)) else max_local_bags
                     if route_bags(t_r) + demand_list[node - 1] > cap:
@@ -1333,6 +1323,7 @@ if not raw_rows:
     st.stop()
 
 current_config_sig = (
+    "v2.3_fujairah_lock",
     source_name,
     raw_bytes_len,
     target_drivers_input,
