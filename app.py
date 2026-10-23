@@ -1,5 +1,6 @@
 ﻿import base64
 import csv
+import html
 import io
 import json
 import math
@@ -7,6 +8,7 @@ import os
 import re
 import sqlite3
 import urllib.parse
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta
 import folium
 from folium.plugins import AntPath, Fullscreen
@@ -18,7 +20,7 @@ from streamlit_folium import st_folium
 # PAGE CONFIGURATION
 # ==========================================
 st.set_page_config(
-    page_title="Lion Delivery Dispatch v2.0",
+    page_title="Lion Delivery Dispatch v3.0",
     page_icon="🚚",
     layout="wide"
 )
@@ -40,13 +42,14 @@ FLEET_DRIVERS = [
 DISTANT_CITIES = {"Al Ain", "Abu Dhabi", "Fujairah / East Coast", "Ras Al Khaimah"}
 UAE_MASAFI_WAYPOINT = (25.3180, 56.1660)
 
-# Fallback coordinates when an order in the portal has an Area/Emirate name but no Google Maps pin
 UAE_AREA_FALLBACK_COORDS = {
     "al ain": (24.2075, 55.7447),
     "remah": (24.1528, 55.3019),
     "shuwaib": (24.7380, 55.7843),
     "sweihan": (24.4667, 55.3333),
     "ruga": (24.4815, 55.3089),
+    "hili": (24.2790, 55.7790),
+    "mezyad": (24.0520, 55.8480),
     "abu dhabi": (24.4539, 54.3773),
     "shamkha": (24.3934, 54.7078),
     "shakhbout": (24.3644, 54.6186),
@@ -60,10 +63,13 @@ UAE_AREA_FALLBACK_COORDS = {
     "saadiyat": (24.5400, 54.4300),
     "fujairah": (25.1288, 56.3265),
     "khor fakkan": (25.3392, 56.3419),
+    "khorfakkan": (25.3392, 56.3419),
     "kalba": (25.0742, 56.3553),
     "dibba": (25.5925, 56.2617),
     "hatta": (24.8051, 56.1206),
     "mleiha": (25.1314, 55.8856),
+    "dhaid": (25.2881, 55.8814),
+    "madam": (24.9554, 55.7625),
     "ras al khaimah": (25.7895, 55.9432),
     "rak": (25.7895, 55.9432),
     "umm al quwain": (25.5647, 55.5552),
@@ -78,8 +84,7 @@ UAE_AREA_FALLBACK_COORDS = {
     "taawun": (25.3125, 55.3742),
     "qasimia": (25.3468, 55.3948),
     "muwaileh": (25.3117, 55.4578),
-    "rahmaniya": (25.3522, 55.5750),
-    "dhaid": (25.2881, 55.8814),
+    "rahmaniya": (25.3522, 55.5450),
     "sharjah": (25.3463, 55.4209),
     "deira": (25.2711, 55.3275),
     "bur dubai": (25.2532, 55.2972),
@@ -110,13 +115,22 @@ DRIVER_COLORS = [
     "#e60073",  # Magenta
 ]
 
-session = requests.Session()
-session.headers.update({
+# Session for Lion Delivery REST API
+api_session = requests.Session()
+api_session.headers.update({
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
     "Accept": "application/json",
     "Content-Type": "application/json",
     "Origin": "https://app.liondelivery.ae",
     "Referer": "https://app.liondelivery.ae/"
+})
+
+# Separate standard browser session for expanding https://maps.app.goo.gl/... links
+maps_session = requests.Session()
+maps_session.headers.update({
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9"
 })
 
 
@@ -213,142 +227,105 @@ def predict_driver_finish_time(stops, total_one_way_km):
 # 2. BORDER CONTROL & GRANULAR UAE CITY DETECTION
 # ==========================================
 def is_in_oman(lat, lon):
-    if 25.240 <= lat <= 25.345 and 56.270 <= lon <= 56.380:
+    """
+    Only exclude points that are genuinely deep inside Oman outside UAE delivery territory.
+    Protects UAE border towns: Khor Fakkan, Kalba, Fujairah, Dibba, Hatta, Masfout, and East Al Ain.
+    """
+    # 1. Musandam Peninsula far north of Ras Al Khaimah
+    if lat >= 26.08:
         return True
-    if lat >= 26.04:
+    # 2. Deep inside Oman south of Hatta / Kalba
+    if lat < 24.72 and lon >= 56.08:
         return True
-    if lat >= 25.620 and lon >= 56.275:
+    # 3. Deep inside Oman east of Al Ain / Buraimi
+    if lat < 24.45 and lon >= 56.00:
         return True
-    if 24.15 <= lat <= 24.45 and lon >= 55.775:
-        return True
-    if 24.78 <= lat <= 24.88 and lon >= 56.140:
-        return True
-    if lat < 24.0 and lon >= 55.80:
+    # 4. Deep inside Oman south of Al Ain / Mezyad
+    if lat < 23.95 and lon >= 55.65:
         return True
     return False
 
 
 def identify_uae_city(lat, lon):
+    """
+    Granular UAE City & Corridor classification:
+      - 'Abu Dhabi': Western coordinates (lon < 54.95) or south-west of Dubai.
+      - 'Al Ain': Al Ain city, Ruga/Sweihan (24.40..24.55, 55.20..55.45), and Al Faqa/Shuwaib (< 24.75).
+      - 'Fujairah / East Coast': Fujairah, Khor Fakkan, Kalba, Dibba, Hatta, Mleiha, Fili, Al Dhaid, Al Madam
+        (all eastern inland/mountain stops with lon >= 55.70 and 24.72 <= lat < 25.58).
+      - 'Ajman': 25.365 <= lat < 25.48, 55.40 <= lon <= 55.58.
+      - 'Sharjah (City / Near Ajman)': Urban Sharjah near Ajman WH (25.25 <= lat < 25.48, 55.34 <= lon <= 55.56).
+      - 'Sharjah (Far Inland)': Outer Sharjah desert/inland (55.56 < lon < 55.70, e.g. Al Bataeh / Nazwa).
+    """
     # 1. Strictly Abu Dhabi for western coordinates
     if lon < 54.95:
         return "Abu Dhabi"
 
     # 2. Specific Ruga / Sweihan eastern corridor -> Al Ain
-    if 24.40 <= lat <= 24.55 and 55.20 <= lon <= 55.45:
+    if 24.40 <= lat <= 24.58 and 55.20 <= lon <= 55.45:
         return "Al Ain"
 
-    # 3. Fujairah, East Coast, Hatta, Mleiha, Fili & E102 Corridor (includes 25.028431, 55.843082)
-    if (lon >= 55.72 and 24.78 <= lat < 25.58) or (lon >= 55.95 and lat >= 24.60) or (lon >= 56.12 and lat >= 25.58):
+    # 3. Fujairah / East Coast / Khor Fakkan / Kalba / Hatta / Mleiha / Fili / Dhaid (E102 & E44 East)
+    if (lon >= 55.70 and 24.72 <= lat < 25.58) or (lon >= 55.95 and lat >= 24.60) or (lon >= 56.12 and lat >= 25.58):
         return "Fujairah / East Coast"
 
-    # 4. Al Ain City + Deep South (< 24.35) + Al Shuwaib / Al Faqa (< 24.78)
-    if lat < 24.35:
+    # 4. Al Ain City + Southern Approach + Al Faqa (< 24.75)
+    if lat < 24.38:
         return "Al Ain"
-    if lat < 24.78 and 55.35 <= lon < 55.95:
-        return "Al Ain"
-    if 24.78 <= lat < 25.02 and 55.55 <= lon < 55.72:
+    if lat < 24.75 and 55.35 <= lon < 55.98:
         return "Al Ain"
 
     # 5. Rest of Abu Dhabi
-    if lat < 24.80 and lon < 55.35:
+    if lat < 24.78 and lon < 55.35:
         return "Abu Dhabi"
 
     # 6. Ras Al Khaimah
-    if lat >= 25.58 and 55.70 <= lon < 56.12:
+    if lat >= 25.58 and 55.65 <= lon < 56.12:
         return "Ras Al Khaimah"
 
     # 7. Umm Al Quwain
-    if 25.48 <= lat < 25.62 and 55.50 <= lon < 55.72:
+    if 25.48 <= lat < 25.62 and 55.50 <= lon < 55.70:
         return "Umm Al Quwain"
 
-    # 8. Ajman
-    if 25.365 <= lat < 25.48 and 55.40 <= lon <= 55.63:
+    # 8. Ajman (Urban Ajman around Warehouse)
+    if 25.365 <= lat < 25.48 and 55.40 <= lon <= 55.58:
         return "Ajman"
 
-    # 9. Sharjah (Near Dubai vs North / Inland)
-    if 25.25 <= lat < 25.48 and 55.34 <= lon < 55.72:
-        if lat < 25.325 and lon < 55.475:
-            return "Sharjah (Near Dubai)"
-        return "Sharjah (North / Inland)"
+    # 9. Urban Sharjah (Near Ajman / Coastal / Airport / Rahmaniya West) -> Eligible for Al Ain Backfill
+    if 25.25 <= lat < 25.48 and 55.34 <= lon <= 55.56:
+        return "Sharjah (City)"
 
-    # 10. Dubai
-    if 24.80 <= lat < 25.32 and 54.95 <= lon <= 55.65:
+    # 10. Far-Out Corners of Sharjah (Nazwa / Al Bataeh / Inland East of E611) -> NEVER used for Al Ain Backfill
+    if 24.95 <= lat < 25.48 and 55.56 < lon < 55.70:
+        return "Sharjah (Far Inland)"
+
+    # 11. Dubai
+    if 24.75 <= lat < 25.32 and 54.95 <= lon <= 55.60:
         return "Dubai"
 
-    return "Sharjah (North / Inland)"
+    return "Sharjah (Far Inland)"
 
 
 # ==========================================
-# 3. URL RESOLUTION, AREA GEOCODER & LIVE API
+# 3. SHORT-LINK & URL RESOLUTION + LIVE API
 # ==========================================
-@st.cache_data(show_spinner=False)
-def resolve_google_maps_url(url):
-    if not url:
-        return None, None
-
-    unquoted = urllib.parse.unquote(str(url).strip().strip("'").strip('"'))
-    patterns = [
-        r"/dir/[^/]+/(-?\d+\.\d+)\s*,\s*[+]?(-?\d+\.\d+)",
-        r"!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)",
-        r"[?&]q=(-?\d+\.\d+)\s*,\s*[+]?(-?\d+\.\d+)",
-        r"/search/(-?\d+\.\d+)\s*,\s*[+]?(-?\d+\.\d+)",
-        r"@(-?\d+\.\d+)\s*,\s*(-?\d+\.\d+)",
-        r"center=(-?\d+\.\d+)%2C(-?\d+\.\d+)",
-        r"(-?\d{2}\.\d{4,})\s*,\s*(5\d\.\d{4,})",
-    ]
-    for pat in patterns:
-        match = re.search(pat, unquoted)
-        if match:
-            lat, lon = float(match.group(1)), float(match.group(2))
-            if -90 <= lat <= 90 and -180 <= lon <= 180:
-                return lat, lon
-
-    if unquoted.startswith("http"):
-        try:
-            resp = session.get(unquoted, allow_redirects=True, timeout=12)
-            final_url = urllib.parse.unquote(resp.url)
-            for pat in patterns:
-                match = re.search(pat, final_url)
-                if match:
-                    lat, lon = float(match.group(1)), float(match.group(2))
-                    if -90 <= lat <= 90 and -180 <= lon <= 180:
-                        return lat, lon
-
-            for pat in patterns:
-                match = re.search(pat, resp.text)
-                if match:
-                    lat, lon = float(match.group(1)), float(match.group(2))
-                    if -90 <= lat <= 90 and -180 <= lon <= 180:
-                        return lat, lon
-        except Exception:
-            pass
-
-    return None, None
-
-
 @st.cache_data(show_spinner=False)
 def geocode_uae_text_fallback(area_text):
-    """
-    When a bag in the portal has no coordinates and no Google Maps link,
-    resolve its Area / Address / Emirate text so the bag is never dropped.
-    """
     if not area_text:
         return None, None
 
-    cleaned = str(area_text).lower().replace("_", " ").strip()
-    if cleaned in ("", "uae corridor", "none", "null"):
+    cleaned = str(area_text).lower().replace("_", " ").replace("+", " ").strip()
+    if cleaned in ("", "uae corridor", "none", "null", "maps", "google"):
         return None, None
 
-    # 1. Check built-in UAE area dictionary first (instant)
     for key, (lat, lon) in UAE_AREA_FALLBACK_COORDS.items():
         if key in cleaned:
             return lat, lon
 
-    # 2. Query OpenStreetMap Nominatim restricted to UAE
     try:
-        q = urllib.parse.quote(f"{area_text}, United Arab Emirates")
+        q = urllib.parse.quote(f"{cleaned}, United Arab Emirates")
         nom_url = f"https://nominatim.openstreetmap.org/search?q={q}&countrycodes=ae&format=json&limit=1"
-        resp = requests.get(nom_url, headers={"User-Agent": "LionDeliveryDispatch/2.0"}, timeout=6)
+        resp = maps_session.get(nom_url, timeout=6)
         if resp.status_code == 200 and resp.json():
             hit = resp.json()[0]
             return float(hit["lat"]), float(hit["lon"])
@@ -358,37 +335,98 @@ def geocode_uae_text_fallback(area_text):
     return None, None
 
 
+@st.cache_data(show_spinner=False)
+def resolve_google_maps_url(url):
+    """
+    Resolves any Google Maps link, including shortened https://maps.app.goo.gl/... links.
+    """
+    if not url:
+        return None, None
+
+    raw_url = str(url).strip().strip("'").strip('"')
+    unquoted = urllib.parse.unquote(raw_url)
+
+    patterns = [
+        r"!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)",
+        r"/dir/[^/]+/(-?\d+\.\d+)\s*,\s*[+]?(-?\d+\.\d+)",
+        r"[?&]q=(-?\d+\.\d+)\s*,\s*[+]?(-?\d+\.\d+)",
+        r"[?&]ll=(-?\d+\.\d+)\s*,\s*[+]?(-?\d+\.\d+)",
+        r"/search/(-?\d+\.\d+)\s*,\s*[+]?(-?\d+\.\d+)",
+        r"@(-?\d+\.\d+)\s*,\s*(-?\d+\.\d+)",
+        r"center=(-?\d+\.\d+)[,%2C]+(-?\d+\.\d+)",
+        r"(2[2-6]\.\d{4,})\s*,\s*[+]?(5[1-6]\.\d{4,})",
+    ]
+
+    for pat in patterns:
+        match = re.search(pat, unquoted)
+        if match:
+            lat, lon = float(match.group(1)), float(match.group(2))
+            if 22.0 <= lat <= 26.5 and 51.0 <= lon <= 56.6:
+                return lat, lon
+
+    if unquoted.startswith("http"):
+        try:
+            resp = maps_session.get(raw_url, allow_redirects=True, timeout=12)
+            final_url = urllib.parse.unquote(resp.url)
+
+            # 1. Check the redirected URL against all coordinate patterns
+            for pat in patterns:
+                match = re.search(pat, final_url)
+                if match:
+                    lat, lon = float(match.group(1)), float(match.group(2))
+                    if 22.0 <= lat <= 26.5 and 51.0 <= lon <= 56.6:
+                        return lat, lon
+
+            # 2. Check HTML body for embedded Google Maps coordinates
+            body_text = html.unescape(resp.text[:150000])
+            html_patterns = patterns + [
+                r"\[null,null,(2[2-6]\.\d{4,}),(5[1-6]\.\d{4,})\]",
+                r"\[(5[1-6]\.\d{5,}),(2[2-6]\.\d{5,})\]",
+            ]
+            for pat in html_patterns:
+                match = re.search(pat, body_text)
+                if match:
+                    v1, v2 = float(match.group(1)), float(match.group(2))
+                    if 22.0 <= v1 <= 26.5 and 51.0 <= v2 <= 56.6:
+                        return v1, v2
+                    if 22.0 <= v2 <= 26.5 and 51.0 <= v1 <= 56.6:
+                        return v2, v1
+
+            # 3. If redirected URL is /maps/place/<Place+Name>/ without raw coords, geocode the place name
+            place_match = re.search(r"/maps/place/([^/?&@]+)", final_url)
+            if place_match:
+                place_name = urllib.parse.unquote_plus(place_match.group(1))
+                lat, lon = geocode_uae_text_fallback(place_name)
+                if lat and lon:
+                    return lat, lon
+        except Exception:
+            pass
+
+    return None, None
+
+
 def extract_row_coordinates(row, url_col):
-    """
-    Returns (lat, lon, is_fallback_pin):
-      1. Direct Latitude / Longitude columns
-      2. Google Maps URL in Map_URL (or hidden in any other column)
-      3. Area / Address / Emirate text fallback geocoding
-    """
     lat_val = row.get("Latitude") or row.get("latitude") or row.get("Lat")
     lon_val = row.get("Longitude") or row.get("longitude") or row.get("Lon")
     if lat_val and lon_val:
         try:
             lat_f = float(str(lat_val).strip().strip("'"))
             lon_f = float(str(lon_val).strip().strip("'"))
-            if 22.0 <= lat_f <= 27.0 and 51.0 <= lon_f <= 57.0:
+            if 22.0 <= lat_f <= 26.5 and 51.0 <= lon_f <= 56.6:
                 return lat_f, lon_f, False
         except ValueError:
             pass
 
-    # Check Map_URL column first
     lat, lon = resolve_google_maps_url(row.get(url_col, ""))
     if lat and lon:
         return lat, lon, False
 
-    # Scan all other fields in case a Google Maps link or coordinate pair was put in Address/Area/Notes
     for val in row.values():
         if val and ("http" in str(val) or "maps" in str(val) or re.search(r"2[345]\.\d{4,}", str(val))):
             lat, lon = resolve_google_maps_url(str(val))
             if lat and lon:
                 return lat, lon, False
 
-    # Fallback: Geocode using Area / Address / Emirate text
     area_candidates = [
         row.get("Area", ""),
         row.get("Address", ""),
@@ -448,7 +486,7 @@ def obtain_fresh_jwt_token(custom_login_url, email_or_user, password):
     for url in candidate_urls:
         for pl in payloads:
             try:
-                resp = session.post(url, json=pl, timeout=12)
+                resp = api_session.post(url, json=pl, timeout=12)
                 if resp.status_code in (200, 201):
                     data = resp.json()
                     tok = find_access_jwt_in_response(data)
@@ -459,12 +497,12 @@ def obtain_fresh_jwt_token(custom_login_url, email_or_user, password):
             except Exception as e:
                 last_err = str(e)
 
-    return None, last_err or "Could not find matching login endpoint. Check Login URL."
+    return None, last_err or "Could not find matching login endpoint."
 
 
 def pull_all_location_board_bags(base_endpoint, bearer_token):
     """
-    Pulls ALL bags from location-board (including bags that have blank coordinates in the portal).
+    Pulls ALL bags from location-board (including bags that only have shortened maps.app.goo.gl links).
     """
     clean_tok = bearer_token.replace("Bearer ", "").strip()
     headers = {
@@ -472,26 +510,21 @@ def pull_all_location_board_bags(base_endpoint, bearer_token):
         "accept": "application/json"
     }
 
-    def extract_bag_objects(obj, found=None):
+    def find_records(obj, found=None):
         if found is None:
             found = []
         if not obj or not isinstance(obj, (dict, list)):
             return found
         if isinstance(obj, list):
             for el in obj:
-                extract_bag_objects(el, found)
+                find_records(el, found)
             return found
-        target = obj.get("stop") if isinstance(obj.get("stop"), dict) else obj
-        has_code = (
-            target.get("bag_code")
-            or target.get("bag_number")
-            or (isinstance(target.get("code"), str) and "LD-BAG" in target.get("code"))
-        )
-        if has_code or target.get("tracking_number"):
-            found.append(target)
+        raw_str = json.dumps(obj)
+        if re.search(r"LD-BAG-\d+", raw_str, re.I) and "results" not in obj and "data" not in obj and "items" not in obj:
+            found.append(obj)
             return found
         for key in obj:
-            extract_bag_objects(obj[key], found)
+            find_records(obj[key], found)
         return found
 
     base_clean = base_endpoint.split("?")[0].strip()
@@ -499,62 +532,61 @@ def pull_all_location_board_bags(base_endpoint, bearer_token):
 
     for page_num in range(1, 35):
         page_url = f"{base_clean}?page={page_num}&page_size=100"
-        resp = session.get(page_url, headers=headers, timeout=15)
+        resp = api_session.get(page_url, headers=headers, timeout=15)
         if resp.status_code != 200:
             if page_num == 1:
                 return None, f"API Error {resp.status_code}: {resp.text[:200]}"
             break
 
         data = resp.json()
-        stops = extract_bag_objects(data)
-        if not stops:
+        records = find_records(data)
+        if not records:
             break
 
         added_this_page = 0
-        for s in stops:
-            bag_code = s.get("bag_code") or s.get("bag_number") or s.get("code") or s.get("tracking_number")
+        for rec in records:
+            s = rec.get("stop") if isinstance(rec.get("stop"), dict) else rec
+            rec_json_str = json.dumps(rec)
+
+            bag_match = re.search(r"LD-BAG-\d+", rec_json_str, re.I)
+            bag_code = s.get("bag_code") or s.get("bag_number") or (bag_match.group(0).upper() if bag_match else None)
             if not bag_code:
                 continue
 
-            lat = s.get("latitude") or s.get("lat") or ""
-            lon = s.get("longitude") or s.get("lng") or s.get("lon") or ""
-            map_url = s.get("location_url_snapshot") or s.get("location_url") or s.get("map_url") or ""
+            lat = s.get("latitude") or rec.get("latitude") or s.get("lat") or rec.get("lat") or ""
+            lon = s.get("longitude") or rec.get("longitude") or s.get("lng") or rec.get("lng") or ""
 
-            # Check if a maps link was pasted into address, landmark, or notes
-            if not map_url:
-                for extra_field in ["address_snapshot", "landmark_snapshot", "notes", "area_snapshot"]:
-                    f_val = str(s.get(extra_field) or "")
-                    if "http" in f_val or "maps" in f_val:
-                        map_url = f_val.strip()
-                        break
-
+            url_match = re.search(
+                r"https?://(?:maps\.app\.goo\.gl/[^\s\"'\\<>]+|goo\.gl/maps/[^\s\"'\\<>]+|(?:www\.)?google\.com/maps[^\s\"'\\<>]+)",
+                rec_json_str,
+                re.I
+            )
+            map_url = url_match.group(0) if url_match else ""
             if not map_url and lat and lon:
                 map_url = f"https://www.google.com/maps?q={lat},{lon}"
 
             area_parts = [
-                str(s.get("area_snapshot") or ""),
-                str(s.get("address_snapshot") or ""),
-                str(s.get("city_zone_snapshot") or ""),
-                str(s.get("emirate_snapshot") or ""),
+                str(s.get("area_snapshot") or rec.get("area_snapshot") or s.get("area") or rec.get("area") or ""),
+                str(s.get("address_snapshot") or rec.get("address_snapshot") or s.get("address") or rec.get("address") or ""),
+                str(s.get("city_zone_snapshot") or rec.get("city_zone_snapshot") or ""),
+                str(s.get("emirate_snapshot") or rec.get("emirate_snapshot") or s.get("emirate") or rec.get("emirate") or ""),
             ]
-            clean_area_parts = [p.strip() for p in area_parts if p.strip() and "http" not in p]
-            area_str = " - ".join(dict.fromkeys(clean_area_parts)) if clean_area_parts else "UAE Corridor"
+            clean_area = " - ".join(dict.fromkeys(p.strip() for p in area_parts if p.strip() and "http" not in p)) or "UAE Corridor"
 
-            # Never skip a bag even if map_url and lat/lon are empty!
             if bag_code not in extracted_map:
                 extracted_map[bag_code] = {
                     "Bag_Number": str(bag_code),
                     "Map_URL": str(map_url),
                     "Latitude": str(lat),
                     "Longitude": str(lon),
-                    "Area": area_str,
-                    "Customer": str(s.get("customer_name_snapshot") or ""),
-                    "Phone": str(s.get("customer_phone_snapshot") or ""),
+                    "Area": clean_area,
+                    "Customer": str(s.get("customer_name_snapshot") or rec.get("customer_name") or ""),
+                    "Phone": str(s.get("customer_phone_snapshot") or rec.get("customer_phone") or ""),
                     "Bags": 1
                 }
                 added_this_page += 1
 
-        if added_this_page == 0 or len(stops) < 100:
+        if added_this_page == 0 or len(records) < 100:
             break
 
     return list(extracted_map.values()), None
@@ -569,7 +601,7 @@ def get_osrm_route_geometry(coords_latlon):
         coord_str = ";".join(f"{lon:.6f},{lat:.6f}" for lat, lon in pts)
         url = f"http://router.project-osrm.org/route/v1/driving/{coord_str}?overview=full&geometries=geojson"
         try:
-            resp = session.get(url, timeout=15).json()
+            resp = maps_session.get(url, timeout=15).json()
             if resp.get("code") == "Ok" and resp.get("routes"):
                 geojson_coords = resp["routes"][0]["geometry"]["coordinates"]
                 return [(lat, lon) for lon, lat in geojson_coords]
@@ -577,18 +609,7 @@ def get_osrm_route_geometry(coords_latlon):
             pass
         return pts
 
-    raw_path = query_osrm(coords_latlon)
-    crosses_oman = any(is_in_oman(lat, lon) for lat, lon in raw_path)
-    if crosses_oman:
-        safe_waypoints = [coords_latlon[0]]
-        for pt in coords_latlon[1:]:
-            if pt[1] >= 55.95:
-                safe_waypoints.append(UAE_MASAFI_WAYPOINT)
-            safe_waypoints.append(pt)
-        safe_path = query_osrm(safe_waypoints)
-        return [pt for pt in safe_path if not is_in_oman(pt[0], pt[1])]
-
-    return raw_path
+    return query_osrm(coords_latlon)
 
 
 def haversine_km(lat1, lon1, lat2, lon2):
@@ -617,7 +638,7 @@ def build_road_distance_matrix(coords):
         if len(chunks) == 1:
             coord_str = ";".join(f"{coords[idx][1]:.6f},{coords[idx][0]:.6f}" for idx in chunks[0])
             osrm_url = f"http://router.project-osrm.org/table/v1/driving/{coord_str}?annotations=distance"
-            resp = session.get(osrm_url, timeout=20).json()
+            resp = maps_session.get(osrm_url, timeout=20).json()
             if resp.get("code") == "Ok" and "distances" in resp:
                 for r_i, row in enumerate(resp["distances"]):
                     for c_j, d in enumerate(row):
@@ -629,7 +650,7 @@ def build_road_distance_matrix(coords):
                     comb = chunks[a] if a == b else (chunks[a] + chunks[b])
                     coord_str = ";".join(f"{coords[idx][1]:.6f},{coords[idx][0]:.6f}" for idx in comb)
                     osrm_url = f"http://router.project-osrm.org/table/v1/driving/{coord_str}?annotations=distance"
-                    resp = session.get(osrm_url, timeout=20).json()
+                    resp = maps_session.get(osrm_url, timeout=20).json()
                     if resp.get("code") == "Ok" and "distances" in resp:
                         for l_i, g_i in enumerate(comb):
                             for l_j, g_j in enumerate(comb):
@@ -747,9 +768,14 @@ def are_cities_compatible_v2(cities_a, cities_b, allow_fuj_rak_combo=False):
     comb = cities_a | cities_b
     distant_in_comb = comb & DISTANT_CITIES
 
+    # Al Ain can ONLY ever pair with Urban Sharjah ("Sharjah (City)") or "Ajman"
+    if "Al Ain" in comb:
+        if comb - {"Al Ain", "Sharjah (City)", "Ajman"}:
+            return False
+
     # Never combine Fujairah / East Coast with Al Ain, Abu Dhabi, or Dubai
     if "Fujairah / East Coast" in comb:
-        if comb & {"Al Ain", "Abu Dhabi", "Dubai", "Sharjah (Near Dubai)"}:
+        if comb & {"Al Ain", "Abu Dhabi", "Dubai"}:
             return False
 
     if len(distant_in_comb) > 1:
@@ -757,19 +783,62 @@ def are_cities_compatible_v2(cities_a, cities_b, allow_fuj_rak_combo=False):
             return False
 
     if "Ras Al Khaimah" in comb:
-        if comb & {"Dubai", "Sharjah (Near Dubai)", "Abu Dhabi", "Al Ain"}:
+        if comb & {"Dubai", "Abu Dhabi", "Al Ain"}:
             return False
 
     has_north = bool(comb & {"Ras Al Khaimah", "Umm Al Quwain", "Fujairah / East Coast"})
-    has_south = bool(comb & {"Dubai", "Abu Dhabi", "Al Ain", "Sharjah (Near Dubai)"})
+    has_south = bool(comb & {"Dubai", "Abu Dhabi", "Al Ain"})
     if has_north and has_south:
         return False
 
     if "Abu Dhabi" in comb:
-        if comb & {"Ajman", "Umm Al Quwain", "Sharjah (North / Inland)", "Fujairah / East Coast", "Ras Al Khaimah"}:
+        if comb - {"Abu Dhabi", "Dubai"}:
             return False
 
     return True
+
+
+def extract_micro_cluster(candidate_nodes, demand_list, dist_matrix, anchor_node, max_bags_to_add, max_radius_km=3.8):
+    if not candidate_nodes or max_bags_to_add <= 0:
+        return []
+
+    best_cluster = []
+    best_score = float("inf")
+
+    for seed in candidate_nodes:
+        if demand_list[seed - 1] > max_bags_to_add:
+            continue
+
+        neighbors = sorted(
+            [n for n in candidate_nodes if n != seed],
+            key=lambda n: max(dist_matrix[seed][n], dist_matrix[n][seed])
+        )
+
+        cluster = [seed]
+        cluster_bags = demand_list[seed - 1]
+        spread_km = 0.0
+
+        for nb in neighbors:
+            d_seed = max(dist_matrix[seed][nb], dist_matrix[nb][seed])
+            if d_seed > max_radius_km:
+                break
+            nb_bags = demand_list[nb - 1]
+            if cluster_bags + nb_bags <= max_bags_to_add:
+                cluster.append(nb)
+                cluster_bags += nb_bags
+                spread_km = max(spread_km, d_seed)
+            if cluster_bags == max_bags_to_add:
+                break
+
+        dist_from_anchor = dist_matrix[anchor_node][seed]
+        shortfall_penalty = (max_bags_to_add - cluster_bags) * 18.0
+        score = (spread_km * 4.0) + (dist_from_anchor * 0.25) + shortfall_penalty
+
+        if score < best_score:
+            best_score = score
+            best_cluster = cluster
+
+    return best_cluster
 
 
 def build_v2_morning_routes(
@@ -787,6 +856,7 @@ def build_v2_morning_routes(
 
     demand_list = [s["bags"] for s in valid_stops]
     city_list = [s["city"] for s in valid_stops]
+    lat_list = [s["lat"] for s in valid_stops]
     lon_list = [s["lon"] for s in valid_stops]
 
     def route_bags(r):
@@ -839,14 +909,13 @@ def build_v2_morning_routes(
             combined_fr, _ = optimize_route_order(f_r + r_r, dist_matrix, city_list)
             distant_routes.append(combined_fr)
 
-    # Check if Local Drivers are actually overloaded (too many packages for local drivers)
     remaining_local_driver_slots = max(1, target_drivers - len(distant_routes))
     local_driver_capacity = remaining_local_driver_slots * max_local_bags
 
     def distant_backfill_priority(r):
         rc = route_cities(r)
         if "Fujairah / East Coast" in rc or "Ras Al Khaimah" in rc:
-            return 0  # If Fujairah/RAK has very few bags, let it pair with Northern Sharjah/Ajman first
+            return 0
         if "Al Ain" in rc:
             return 1
         return 2
@@ -859,15 +928,14 @@ def build_v2_morning_routes(
         local_bags_left = sum(demand_list[n - 1] for n in local_pool)
         local_overflow = max(0, local_bags_left - local_driver_capacity)
 
-        # STRICT BACKFILL RULE:
-        # 1. Al Ain and Abu Dhabi ONLY take backfills if local drivers have too many bags (local_overflow > 0).
-        # 2. Fujairah / RAK only takes northern return bags if local_overflow > 0 OR if Fujairah/RAK has < min_driver_bags.
-        if ("Al Ain" in rc or "Abu Dhabi" in rc):
-            if local_overflow <= 0:
+        if "Al Ain" in rc or "Abu Dhabi" in rc:
+            if local_overflow <= 0 and curr_bags >= min_driver_bags:
                 continue
-            bags_needed = min(local_overflow, max(0, max_distant_bags - curr_bags))
+            if local_overflow > 0:
+                bags_needed = min(local_overflow, max(0, max_distant_bags - curr_bags))
+            else:
+                bags_needed = max(0, min_driver_bags - curr_bags)
         else:
-            # Fujairah / RAK
             if local_overflow > 0:
                 bags_needed = min(local_overflow, max(0, max_distant_bags - curr_bags))
             elif curr_bags < min_driver_bags:
@@ -878,40 +946,44 @@ def build_v2_morning_routes(
         if bags_needed <= 0 or not local_pool:
             continue
 
-        if "Abu Dhabi" in rc:
-            # Strictly western Dubai / Sharjah Near Dubai (never east of 55.55)
+        if "Al Ain" in rc:
+            # STRICT AL AIN BACKFILL RULE:
+            # ONLY Urban Sharjah ("Sharjah (City)") or "Ajman" near Ajman Warehouse.
+            # NEVER Fujairah, NEVER Dubai, NEVER RAK, NEVER Far-Out Corners of Sharjah (lon > 55.56).
             eligible = [
                 n for n in local_pool
-                if city_list[n - 1] in {"Dubai", "Sharjah (Near Dubai)"} and lon_list[n - 1] < 55.55
+                if city_list[n - 1] in {"Sharjah (City)", "Ajman"}
+                and 25.26 <= lat_list[n - 1] <= 25.47
+                and 55.34 <= lon_list[n - 1] <= 55.56
+                and dist_matrix[0][n] <= 28.0
+            ]
+            radius = 3.5
+            anchor_for_backfill = 0  # Anchor near Ajman Warehouse return corridor
+        elif "Abu Dhabi" in rc:
+            eligible = [
+                n for n in local_pool
+                if city_list[n - 1] == "Dubai" and lon_list[n - 1] < 55.45
             ]
             radius = 4.0
-        elif "Al Ain" in rc:
-            # Strictly coastal/urban Sharjah or Dubai (never east of 55.58, never Fujairah/Mleiha corridor)
+            ordered_primary, _ = optimize_route_order(d_route, dist_matrix, city_list)
+            anchor_for_backfill = ordered_primary[-1]
+        else:
             eligible = [
                 n for n in local_pool
-                if city_list[n - 1] in {"Sharjah (Near Dubai)", "Sharjah (North / Inland)", "Dubai"}
-                and lon_list[n - 1] < 55.58
+                if city_list[n - 1] in {"Sharjah (City)", "Sharjah (Far Inland)", "Ajman", "Umm Al Quwain"}
             ]
             radius = 4.5
-        else:
-            # Fujairah / East Coast / RAK can backfill along northern return corridor (Sharjah North / Ajman / UAQ)
-            eligible = [
-                n for n in local_pool
-                if city_list[n - 1] in {"Sharjah (North / Inland)", "Ajman", "Umm Al Quwain"}
-            ]
-            radius = 5.0
+            ordered_primary, _ = optimize_route_order(d_route, dist_matrix, city_list)
+            anchor_for_backfill = ordered_primary[-1]
 
         if not eligible:
             continue
-
-        ordered_primary, _ = optimize_route_order(d_route, dist_matrix, city_list)
-        exit_node = ordered_primary[-1]
 
         micro_cluster = extract_micro_cluster(
             candidate_nodes=eligible,
             demand_list=demand_list,
             dist_matrix=dist_matrix,
-            anchor_node=exit_node,
+            anchor_node=anchor_for_backfill,
             max_bags_to_add=bags_needed,
             max_radius_km=radius
         )
@@ -975,8 +1047,6 @@ def build_v2_morning_routes(
 
     all_routes = distant_routes + local_routes
 
-    # Small-route cleanup: NEVER dissolve a distant route into Al Ain or Abu Dhabi,
-    # and NEVER add local stops to Al Ain / Abu Dhabi unless local routes are full.
     changed = True
     while changed and len(all_routes) > 1:
         changed = False
@@ -984,7 +1054,6 @@ def build_v2_morning_routes(
         smallest = all_routes[0]
         smallest_cities = route_cities(smallest)
 
-        # Never break up an Al Ain, Abu Dhabi, or Fujairah route into other routes
         if smallest_cities & {"Al Ain", "Abu Dhabi", "Fujairah / East Coast"}:
             break
 
@@ -996,7 +1065,6 @@ def build_v2_morning_routes(
                 n_city = {city_list[node - 1]}
                 for idx, t_r in enumerate(temp):
                     t_cities = route_cities(t_r)
-                    # Do not push leftover local bags into Al Ain or Abu Dhabi if any local route has space
                     if t_cities & {"Al Ain", "Abu Dhabi"}:
                         continue
                     is_t_distant = bool(t_cities & DISTANT_CITIES)
@@ -1181,7 +1249,7 @@ def build_google_maps_nav_links(wh_lat, wh_lon, stops):
 db_stats = get_recent_driver_stats()
 default_far_yesterday = [d for d, st_info in db_stats.items() if st_info["went_far_yesterday"]]
 
-st.sidebar.title("🧪 V2 LAB — Dispatch & Rotation")
+st.sidebar.title("🧪 V2/V3 — Dispatch & Rotation")
 
 selected_driver_filter = st.sidebar.selectbox(
     "🔍 View Driver on Map",
@@ -1260,7 +1328,7 @@ else:
             st.sidebar.error("Enter your password (or save LION_PASSWORD in Streamlit Secrets).")
 
         if active_token:
-            with st.spinner("Pulling all pages from location-board..."):
+            with st.spinner("Pulling all pages (including short links) from location-board..."):
                 pulled_rows, pull_err = pull_all_location_board_bags(api_endpoint, active_token)
                 if pull_err:
                     st.sidebar.error(pull_err)
@@ -1290,12 +1358,12 @@ resting_today_input = st.sidebar.multiselect(
     default=[]
 )
 
-st.sidebar.markdown("### ⚙️ V2 Route & Backfill Rules")
-target_drivers_input = st.sidebar.slider("Target Morning Drivers", min_value=3, max_value=7, value=5)
+st.sidebar.markdown("### ⚙️ Route & Backfill Rules")
+target_drivers_input = st.sidebar.slider("Target Morning Drivers", min_value=3, max_value=7, value=6)
 max_bags_local_input = st.sidebar.slider("Max Bags (Local Driver - DXB/SHJ)", min_value=15, max_value=25, value=21)
 max_bags_distant_input = st.sidebar.slider("Target Cap (Distant Driver w/ Backfill)", min_value=14, max_value=19, value=16)
 min_bags_input = st.sidebar.slider("Min Bags per Driver (Combine / Backfill)", min_value=6, max_value=12, value=10)
-max_dist_input = st.sidebar.number_input("Max Warehouse Road Distance (KM)", value=240.0, step=10.0)
+max_dist_input = st.sidebar.number_input("Max Warehouse Road Distance (KM)", value=260.0, step=10.0)
 
 
 # ==========================================
@@ -1303,8 +1371,7 @@ max_dist_input = st.sidebar.number_input("Max Warehouse Road Distance (KM)", val
 # ==========================================
 wh_lat, wh_lon = resolve_google_maps_url(WAREHOUSE_URL)
 if not wh_lat:
-    st.error("Failed to resolve warehouse coordinates from URL.")
-    st.stop()
+    wh_lat, wh_lon = 25.4052, 55.5136
 
 if not raw_rows:
     st.info("👋 Upload `lion_delivery_all_bags.csv` OR switch to **⚡ Live API Sync (location-board)** in the sidebar.")
@@ -1323,7 +1390,7 @@ if not raw_rows:
     st.stop()
 
 current_config_sig = (
-    "v2.3_fujairah_lock",
+    "v3.0_alain_sharjah_ajman_only",
     source_name,
     raw_bytes_len,
     target_drivers_input,
@@ -1335,14 +1402,14 @@ current_config_sig = (
     tuple(sorted(resting_today_input))
 )
 
-force_rerun = st.sidebar.button("🔄 Re-Run V2 Optimization")
+force_rerun = st.sidebar.button("🔄 Re-Run Optimization")
 
 if (
     "dispatch_data" not in st.session_state
     or st.session_state.get("config_sig") != current_config_sig
     or force_rerun
 ):
-    with st.spinner("Running V2 Primary-First Sequencing & Area Fallback Geocoding..."):
+    with st.spinner("Resolving short links & running Primary-First Sequencing..."):
         resolved, unresolvable, oman_stops = [], [], []
         url_col = next((c for c in fieldnames if any(k in c.lower() for k in ["url", "link", "map", "location"])), "Map_URL")
 
@@ -1488,7 +1555,6 @@ if (
             })
             final_rows.append(item)
 
-        # Keep any completely unresolvable rows visible so no bag out of 82 is ever lost
         for bad_row in unresolvable:
             item = dict(bad_row)
             item.update({
@@ -1537,16 +1603,15 @@ kpi1, kpi2, kpi3, kpi4 = st.columns(4)
 kpi1.metric("Active Drivers", f"{len(active_driver_ids)} / 7")
 kpi2.metric("Total Bags Assigned", f"{total_bags_assigned} / {len(master_rows)}")
 kpi3.metric("Resting Drivers", ", ".join(resting_drivers_today) if resting_drivers_today else "None")
-kpi4.metric("Missing Exact Pin / Excluded", f"{len(no_pin_bags)} No-Pin | {len(excluded_bags)} Excl.")
+kpi4.metric(f"Excluded (>{int(max_dist_input)}km / Oman)", len(excluded_bags))
 
 if no_pin_bags:
-    with st.expander(f"⚠️ {len(no_pin_bags)} Bag(s) Had No Exact Coordinate Pin in Portal (Auto-Placed by Area Name)", expanded=True):
+    with st.expander(f"⚠️ {len(no_pin_bags)} Bag(s) Had No Exact Coordinate Pin (Resolved via Area / Short-Link Fallback)", expanded=True):
         st.table([
             {
                 "Bag Code": r.get(bag_col, ""),
-                "Portal Area / Address": r.get("Area", ""),
-                "Customer": r.get("Customer", ""),
-                "Phone": r.get("Phone", ""),
+                "Map URL": r.get("Map_URL", ""),
+                "Portal Area": r.get("Area", ""),
                 "Assigned To": r.get("Driver_ID", ""),
                 "Stop #": r.get("Stop_Sequence", "-")
             }
@@ -1719,7 +1784,7 @@ for d_idx, d_name in enumerate(active_driver_ids):
             f'<b>{d_name} — Stop #{s["Stop_Sequence"]}</b>{fb_note}<br>'
             f'<b>Phase:</b> {phase_str}<br>'
             f'<b>Bag:</b> {s.get(bag_col, "")}<br>'
-            f'<b>Area:</b> {s.get("Area", s.get("City_Area", ""))}<br>'
+            f'<b>Area:</b> {s.get("City_Area", "")}<br>'
             f'<b>From WH:</b> {s.get("Warehouse_Road_KM", "")} km (+{s.get("Leg_Distance_KM", "")} km leg)<br>'
             f'<b>Est. Finish:</b> {s.get("Est_Finish_Time", "")}<br>'
             f'<a href="{pin_url}" target="_blank" style="color:#1a73e8; font-weight:bold;">Open Pin ↗</a> | '
@@ -1729,7 +1794,7 @@ for d_idx, d_name in enumerate(active_driver_ids):
         folium.Marker(
             location=[disp_lat, disp_lon],
             popup=folium.Popup(popup_html, max_width=280),
-            tooltip=f"{s.get(bag_col, '')} • Stop #{s['Stop_Sequence']} ({phase_str}) • {s.get('Area', s.get('City_Area', ''))}",
+            tooltip=f"{s.get(bag_col, '')} • Stop #{s['Stop_Sequence']} ({phase_str}) • {s.get('City_Area', '')}",
             icon=badge
         ).add_to(fg)
 
@@ -1806,7 +1871,7 @@ btn_col1, btn_col2 = st.columns(2)
 btn_col1.download_button(
     label="📥 Download Today's Dispatch Plan (CSV)",
     data=csv_buffer.getvalue().encode("utf-8-sig"),
-    file_name=f"dispatch_plan_v2_{date.today().isoformat()}.csv",
+    file_name=f"dispatch_plan_v3_{date.today().isoformat()}.csv",
     mime="text/csv"
 )
 
