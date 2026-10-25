@@ -2028,8 +2028,8 @@ for d_name in active_driver_ids:
     est_fin = d_stops[0].get("Est_Finish_Time", "")
     est_hrs = d_stops[0].get("Est_Shift_Hours", "")
 
-    primary_stops = [s for s in d_stops if s.get("Stop_Phase"] == "Primary City"]
-    return_stops = [s for s in d_stops if s.get("Stop_Phase"] == "Return-Leg Cluster"]
+    primary_stops = [s for s in d_stops if s.get("Stop_Phase") == "Primary City"]
+    return_stops = [s for s in d_stops if s.get("Stop_Phase") == "Return-Leg Cluster"]
 
     primary_str = ", ".join(f"#{s['Stop_Sequence']}: {s.get(bag_col, '')} ({s.get('City_Area', '')})" for s in primary_stops)
     return_str = ", ".join(f"#{s['Stop_Sequence']}: {s.get(bag_col, '')} ({s.get('City_Area', '')})" for s in return_stops)
