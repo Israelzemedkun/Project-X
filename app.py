@@ -1043,6 +1043,137 @@ def build_google_maps_nav_links(wh_lat, wh_lon, stops):
 
 
 # ==========================================
+# V3 FEATURE: UAE STATE & CORRIDOR GRID OVERLAY
+# ==========================================
+UAE_DISPATCH_ZONES = [
+    {
+        "name": "ABU DHABI",
+        "rule": "West of 54.95°E & South-West of Dubai",
+        "color": "#0284c7",
+        "label_pos": (24.38, 54.55),
+        "coords": [
+            (22.80, 51.50), (25.00, 51.50), (25.00, 54.95), (24.78, 54.95),
+            (24.78, 55.35), (24.58, 55.35), (24.58, 55.20), (24.40, 55.20),
+            (24.40, 55.35), (22.80, 55.35)
+        ]
+    },
+    {
+        "name": "AL AIN (+ RUGA / SWEIHAN)",
+        "rule": "Al Ain + Ruga (24.40–24.58°N, 55.20–55.45°E) + Al Faqa (<24.75°N)",
+        "color": "#d97706",
+        "label_pos": (24.32, 55.62),
+        "coords": [
+            (23.95, 55.35), (24.40, 55.35), (24.40, 55.20), (24.58, 55.20),
+            (24.58, 55.45), (24.75, 55.45), (24.75, 55.70), (24.72, 55.70),
+            (24.72, 55.98), (23.95, 55.98)
+        ]
+    },
+    {
+        "name": "FUJAIRAH / EAST COAST (E102 / HATTA / MLEIHA)",
+        "rule": "East of 55.70°E (24.72–25.58°N) + Dibba/Khor Fakkan/Kalba",
+        "color": "#7c3aed",
+        "label_pos": (25.15, 56.08),
+        "coords": [
+            (24.72, 55.70), (25.58, 55.70), (25.58, 56.12), (25.68, 56.12),
+            (25.68, 56.38), (24.72, 56.38)
+        ]
+    },
+    {
+        "name": "DUBAI",
+        "rule": "24.75–25.25°N, 54.95–55.60°E",
+        "color": "#2563eb",
+        "label_pos": (25.05, 55.24),
+        "coords": [
+            (24.78, 54.95), (25.25, 54.95), (25.25, 55.56), (25.32, 55.56),
+            (25.32, 55.60), (24.75, 55.60), (24.75, 55.35), (24.78, 55.35)
+        ]
+    },
+    {
+        "name": "SHARJAH (CITY)",
+        "rule": "25.25–25.48°N, 55.34–55.56°E (Al Ain Backfill Eligible)",
+        "color": "#059669",
+        "label_pos": (25.31, 55.45),
+        "coords": [
+            (25.25, 55.34), (25.48, 55.34), (25.48, 55.40), (25.365, 55.40),
+            (25.365, 55.56), (25.25, 55.56)
+        ]
+    },
+    {
+        "name": "SHARJAH (FAR INLAND)",
+        "rule": "55.56–55.70°E (No Al Ain Backfill)",
+        "color": "#64748b",
+        "label_pos": (25.12, 55.63),
+        "coords": [
+            (24.75, 55.60), (25.32, 55.60), (25.32, 55.56), (25.365, 55.56),
+            (25.365, 55.58), (25.48, 55.58), (25.48, 55.70), (24.75, 55.70)
+        ]
+    },
+    {
+        "name": "AJMAN",
+        "rule": "25.365–25.48°N, 55.40–55.58°E (Al Ain Backfill Eligible)",
+        "color": "#dc2626",
+        "label_pos": (25.42, 55.49),
+        "coords": [
+            (25.365, 55.40), (25.48, 55.40), (25.48, 55.58), (25.365, 55.58)
+        ]
+    },
+    {
+        "name": "UMM AL QUWAIN",
+        "rule": "25.48–25.62°N, 55.50–55.70°E",
+        "color": "#0d9488",
+        "label_pos": (25.55, 55.60),
+        "coords": [
+            (25.48, 55.50), (25.62, 55.50), (25.62, 55.65), (25.58, 55.65),
+            (25.58, 55.70), (25.48, 55.70)
+        ]
+    },
+    {
+        "name": "RAS AL KHAIMAH",
+        "rule": "25.58–26.08°N, 55.65–56.12°E",
+        "color": "#9333ea",
+        "label_pos": (25.80, 55.90),
+        "coords": [
+            (25.58, 55.65), (26.08, 55.65), (26.08, 56.12), (25.58, 56.12)
+        ]
+    }
+]
+
+
+def add_uae_state_grid_to_map(m, show_by_default=True):
+    """Draws dashed state/corridor boundary boxes and floating labels on the Folium map."""
+    grid_fg = folium.FeatureGroup(name="🗺️ State & Dispatch Zone Borders", show=show_by_default)
+
+    for z in UAE_DISPATCH_ZONES:
+        # Draw dashed boundary box (interactive=False so it never blocks clicking on pins)
+        folium.Polygon(
+            locations=z["coords"],
+            color=z["color"],
+            weight=2.5,
+            dash_array="7, 6",
+            fill=True,
+            fill_color=z["color"],
+            fill_opacity=0.06,
+            interactive=False
+        ).add_to(grid_fg)
+
+        # Add clean floating state label
+        label_html = (
+            f'<div style="display:inline-block; background:rgba(255,255,255,0.82); '
+            f'color:{z["color"]}; border:1.5px solid {z["color"]}; border-radius:4px; '
+            f'padding:2px 6px; font-family:Arial,sans-serif; font-size:10px; '
+            f'font-weight:800; white-space:nowrap; pointer-events:none; '
+            f'box-shadow:0 1px 3px rgba(0,0,0,0.2);">'
+            f'{z["name"]}</div>'
+        )
+        folium.Marker(
+            location=z["label_pos"],
+            icon=folium.DivIcon(html=label_html, icon_size=(160, 22), icon_anchor=(80, 11))
+        ).add_to(grid_fg)
+
+    grid_fg.add_to(m)
+
+
+# ==========================================
 # 6. SIDEBAR: DUAL INPUT (CSV UPLOAD + AUTO-LOGIN API SYNC)
 # ==========================================
 db_stats = get_recent_driver_stats()
@@ -1055,6 +1186,8 @@ selected_driver_filter = st.sidebar.selectbox(
     options=["Show All Drivers"] + FLEET_DRIVERS,
     index=0
 )
+
+show_state_grid = st.sidebar.checkbox("🗺️ Show State / Zone Borders on Map", value=True)
 
 st.sidebar.markdown("### 📂 1. Load Delivery Orders")
 data_source = st.sidebar.radio(
@@ -1456,6 +1589,7 @@ m = folium.Map(location=[wh_lat, wh_lon], zoom_start=9, tiles=None, control_scal
 Fullscreen(position="topleft", force_separate_button=True).add_to(m)
 
 folium.TileLayer(
+    add_uae_state_grid_to_map(m, show_by_default=show_state_grid)
     "https://mt1.google.com/vt/lyrs=m&x={x}&y={y}&z={z}",
     attr="Google Maps",
     name="Google Maps (Streets)",
