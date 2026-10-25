@@ -1389,6 +1389,12 @@ selected_driver_filter = st.sidebar.selectbox(
     index=0
 )
 show_state_grid = st.sidebar.checkbox("🗺️ Show Real Emirate Borders on Map", value=True)
+if show_state_grid:
+    border_opacity = st.sidebar.slider("Border Fill Opacity", min_value=0.0, max_value=0.40, value=0.06, step=0.02)
+else:
+    border_opacity = 0.0
+
+route_line_opacity = st.sidebar.slider("Driver Route Line Opacity", min_value=0.2, max_value=1.0, value=0.88, step=0.1)
 
 st.sidebar.markdown("### 📂 1. Load Delivery Orders")
 data_source = st.sidebar.radio(
@@ -1824,7 +1830,7 @@ with ctrl_tab2:
             st.rerun()
 
 # ==========================================
-# 9. LARGE MAP RENDER (WITH REAL GEOJSON EMIRATE BORDERS)
+# 9. LARGE MAP RENDER (WITH OPACITY CONTROLS)
 # ==========================================
 m = folium.Map(location=[wh_lat, wh_lon], zoom_start=9, tiles=None, control_scale=True)
 Fullscreen(position="topleft", force_separate_button=True).add_to(m)
@@ -1853,7 +1859,48 @@ folium.TileLayer(
     control=True
 ).add_to(m)
 
-add_uae_state_grid_to_map(m, show_by_default=show_state_grid)
+# Pass the sidebar slider opacity into the GeoJSON border renderer
+def add_uae_state_grid_to_map_custom(m, show_by_default=True, fill_op=0.06):
+    if not show_by_default:
+        return
+    grid_fg = folium.FeatureGroup(name="🗺️ UAE Emirate Borders (Real GeoJSON)", show=True)
+    borders = fetch_uae_real_borders_geojson()
+
+    for item in borders:
+        state_color = item["color"]
+        feature = {
+            "type": "Feature",
+            "properties": {"name": item["name"], "color": state_color},
+            "geometry": item["geojson"]
+        }
+        folium.GeoJson(
+            feature,
+            style_function=lambda feat, c=state_color, op=fill_op: {
+                "color": c,
+                "weight": 2.5,
+                "opacity": 0.9,
+                "dashArray": "6, 4",
+                "fillColor": c,
+                "fillOpacity": op,
+            },
+            interactive=False
+        ).add_to(grid_fg)
+
+        label_html = (
+            f'<div style="display:inline-block; background:rgba(255,255,255,0.88); '
+            f'color:{state_color}; border:1.5px solid {state_color}; border-radius:4px; '
+            f'padding:2px 6px; font-family:Arial,sans-serif; font-size:10px; '
+            f'font-weight:800; white-space:nowrap; pointer-events:none; '
+            f'box-shadow:0 1px 3px rgba(0,0,0,0.25);">'
+            f'{item["name"]}</div>'
+        )
+        folium.Marker(
+            location=item["label_pos"],
+            icon=folium.DivIcon(html=label_html, icon_size=(130, 22), icon_anchor=(65, 11))
+        ).add_to(grid_fg)
+    grid_fg.add_to(m)
+
+add_uae_state_grid_to_map_custom(m, show_by_default=show_state_grid, fill_op=border_opacity)
 
 folium.Marker(
     location=[wh_lat, wh_lon],
@@ -1889,7 +1936,8 @@ for d_idx, d_name in enumerate(active_driver_ids):
         route_coords_for_bounds.append(pt)
 
     road_polyline = get_osrm_route_geometry(waypoints)
-    AntPath(locations=road_polyline, color=color, weight=5, opacity=0.88, tooltip=d_name).add_to(fg)
+    # Uses the sidebar slider opacity for route lines
+    AntPath(locations=road_polyline, color=color, weight=5, opacity=route_line_opacity, tooltip=d_name).add_to(fg)
 
     for s in d_stops:
         raw_lat, raw_lon = float(s["Resolved_Lat"]), float(s["Resolved_Lon"])
@@ -1913,23 +1961,18 @@ for d_idx, d_name in enumerate(active_driver_ids):
             f'{s["Stop_Sequence"]}</div>'
         )
         badge = folium.DivIcon(html=badge_html, icon_size=(24, 24), icon_anchor=(12, 12))
-        fb_note = "<br><b style='color:#d50000;'>⚠️ Area-Only Pin (No Exact Coords in Portal)</b>" if is_area_fb else ""
         popup_html = (
             f'<div style="font-family:Arial,sans-serif; font-size:12px; min-width:200px;">'
-            f'<b>{d_name} — Stop #{s["Stop_Sequence"]}</b>{fb_note}<br>'
-            f'<b>Phase:</b> {phase_str}<br>'
+            f'<b>{d_name} — Stop #{s["Stop_Sequence"]}</b><br>'
             f'<b>Bag:</b> {s.get(bag_col, "")}<br>'
             f'<b>State/Zone:</b> {s.get("City_Area", "")}<br>'
-            f'<b>From WH:</b> {s.get("Warehouse_Road_KM", "")} km (+{s.get("Leg_Distance_KM", "")} km leg)<br>'
-            f'<b>Est. Finish:</b> {s.get("Est_Finish_Time", "")}<br>'
-            f'<a href="{pin_url}" target="_blank" style="color:#1a73e8; font-weight:bold;">Open Pin ↗</a> | '
-            f'<a href="{primary_nav_url}" target="_blank" style="color:#0b8043; font-weight:bold;">Driver Route ↗</a>'
+            f'<a href="{pin_url}" target="_blank" style="color:#1a73e8; font-weight:bold;">Open Pin ↗</a>'
             f'</div>'
         )
         folium.Marker(
             location=[disp_lat, disp_lon],
             popup=folium.Popup(popup_html, max_width=280),
-            tooltip=f"{s.get(bag_col, '')} • Stop #{s['Stop_Sequence']} ({phase_str}) • {s.get('City_Area', '')}",
+            tooltip=f"{s.get(bag_col, '')} • Stop #{s['Stop_Sequence']} ({s.get('City_Area', '')})",
             icon=badge
         ).add_to(fg)
 
@@ -1942,28 +1985,6 @@ for d_idx, d_name in enumerate(active_driver_ids):
         f'<a href="{primary_nav_url}" target="_blank" style="color:#1a73e8; text-decoration:none; font-weight:bold;">[🗺️ Nav]</a>'
         f'</span>'
     )
-
-if selected_driver_filter == "Show All Drivers" and excluded_bags:
-    ex_fg = folium.FeatureGroup(name=f"🚫 Excluded Stops ({len(excluded_bags)})", show=True)
-    for ex_stop in excluded_bags:
-        lat, lon = float(ex_stop["Resolved_Lat"]), float(ex_stop["Resolved_Lon"])
-        route_coords_for_bounds.append((lat, lon))
-        is_om = "OMAN" in ex_stop["Driver_ID"]
-        icon_color = "#e65100" if is_om else "#212121"
-        label = "OUTSIDE UAE (OMAN)" if is_om else f"EXCLUDED ({ex_stop.get('Driver_ID', '')})"
-        warn_html = (
-            f'<div style="background:{icon_color}; color:#fff; border-radius:50%; '
-            f'width:24px; height:24px; text-align:center; font-weight:bold; '
-            f'font-size:11px; line-height:24px; border:2px solid #ff5252;">✕</div>'
-        )
-        warn_badge = folium.DivIcon(html=warn_html, icon_size=(24, 24), icon_anchor=(12, 12))
-        folium.Marker(
-            location=[lat, lon],
-            popup=f"<b>🚫 {label}</b><br>Bag: {ex_stop.get(bag_col, '')}<br>Area: {ex_stop.get('Area', '')}",
-            tooltip=f"🚫 {label}: {ex_stop.get(bag_col, '')}",
-            icon=warn_badge
-        ).add_to(ex_fg)
-    ex_fg.add_to(m)
 
 if len(route_coords_for_bounds) > 1:
     lats = [c[0] for c in route_coords_for_bounds]
