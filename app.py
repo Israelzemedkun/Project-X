@@ -2043,3 +2043,240 @@ for d_name in active_driver_ids:
         card_md += f"\n> **2️⃣ Return-Leg Cluster ({len(return_stops)}):** `{return_str}`"
 
     st.markdown(card_md)
+
+
+
+
+# ==========================================
+# 9. LARGE MAP RENDER (WITH DRAW / LASSO SELECTOR)
+# ==========================================
+m = folium.Map(location=[wh_lat, wh_lon], zoom_start=9, tiles=None, control_scale=True)
+Fullscreen(position="topleft", force_separate_button=True).add_to(m)
+
+# Enable Rectangle and Polygon drawing tools for selection
+Draw(
+    export=False,
+    position="topleft",
+    draw_options={
+        "polyline": False,
+        "polygon": True,
+        "circle": False,
+        "marker": False,
+        "circlemarker": False,
+        "rectangle": True,
+    },
+    edit_options={"edit": False}
+).add_to(m)
+
+folium.TileLayer(
+    "https://mt1.google.com/vt/lyrs=m&x={x}&y={y}&z={z}",
+    attr="Google Maps",
+    name="Google Maps (Streets)",
+    overlay=False,
+    control=True
+).add_to(m)
+
+folium.TileLayer(
+    "https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}",
+    attr="Esri",
+    name="Esri Street Map",
+    overlay=False,
+    control=True
+).add_to(m)
+
+folium.TileLayer(
+    "https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}",
+    attr="Google Satellite",
+    name="Google Satellite + Roads",
+    overlay=False,
+    control=True
+).add_to(m)
+
+add_uae_state_grid_to_map(m, show_by_default=show_state_grid)
+
+folium.Marker(
+    location=[wh_lat, wh_lon],
+    popup="<b>Ajman Warehouse (6:30 AM Start)</b>",
+    tooltip="Ajman Warehouse",
+    icon=folium.Icon(color="black", icon="home", prefix="fa")
+).add_to(m)
+
+route_coords_for_bounds = [(wh_lat, wh_lon)]
+legend_chips = []
+seen_marker_coords = {}
+
+for d_idx, d_name in enumerate(active_driver_ids):
+    if selected_driver_filter != "Show All Drivers" and selected_driver_filter.lower() not in d_name.lower():
+        continue
+
+    color = DRIVER_COLORS[d_idx % len(DRIVER_COLORS)]
+    d_stops = [r for r in master_rows if r["Driver_ID"] == d_name]
+    d_stops.sort(key=lambda x: int(x["Stop_Sequence"]))
+
+    if not d_stops:
+        continue
+
+    total_bags = d_stops[0].get("Route_Total_Bags", len(d_stops))
+    total_km = d_stops[0].get("Route_OneWay_KM", "0")
+    nav_links = build_google_maps_nav_links(wh_lat, wh_lon, d_stops)
+    primary_nav_url = nav_links[0][1] if nav_links else "#"
+
+    fg = folium.FeatureGroup(name=f"{d_name} ({total_bags} bags | {total_km} km)", show=True)
+
+    waypoints = [(wh_lat, wh_lon)] + [(float(s["Resolved_Lat"]), float(s["Resolved_Lon"])) for s in d_stops]
+    for pt in waypoints:
+        route_coords_for_bounds.append(pt)
+
+    road_polyline = get_osrm_route_geometry(waypoints)
+    AntPath(locations=road_polyline, color=color, weight=5, opacity=0.88, tooltip=d_name).add_to(fg)
+
+    for s in d_stops:
+        raw_lat, raw_lon = float(s["Resolved_Lat"]), float(s["Resolved_Lon"])
+        coord_key = (round(raw_lat, 5), round(raw_lon, 5))
+        dup_count = seen_marker_coords.get(coord_key, 0)
+        seen_marker_coords[coord_key] = dup_count + 1
+
+        disp_lat = raw_lat + (dup_count * 0.00014)
+        disp_lon = raw_lon + (dup_count * 0.00014)
+
+        phase_str = s.get("Stop_Phase", "Primary City")
+        is_area_fb = s.get("Dispatch_Status") == "ASSIGNED_AREA_FALLBACK_NO_PIN"
+        border_style = "2px dotted #ff1744" if is_area_fb else ("2px dashed #ffeb3b" if phase_str == "Return-Leg Cluster" else "2px solid #fff")
+
+        pin_url = f"https://www.google.com/maps?q={raw_lat},{raw_lon}"
+        badge_html = (
+            f'<div style="background:{color}; color:#fff; border-radius:50%; '
+            f'width:24px; height:24px; text-align:center; font-weight:bold; '
+            f'font-size:11px; line-height:24px; border:{border_style}; '
+            f'box-shadow:0 2px 4px rgba(0,0,0,0.4);">'
+            f'{s["Stop_Sequence"]}</div>'
+        )
+        badge = folium.DivIcon(html=badge_html, icon_size=(24, 24), icon_anchor=(12, 12))
+        popup_html = (
+            f'<div style="font-family:Arial,sans-serif; font-size:12px; min-width:200px;">'
+            f'<b>{d_name} — Stop #{s["Stop_Sequence"]}</b><br>'
+            f'<b>Bag:</b> {s.get(bag_col, "")}<br>'
+            f'<b>State/Zone:</b> {s.get("City_Area", "")}<br>'
+            f'<a href="{pin_url}" target="_blank" style="color:#1a73e8; font-weight:bold;">Open Pin ↗</a>'
+            f'</div>'
+        )
+        folium.Marker(
+            location=[disp_lat, disp_lon],
+            popup=folium.Popup(popup_html, max_width=280),
+            tooltip=f"{s.get(bag_col, '')} • Stop #{s['Stop_Sequence']} ({s.get('City_Area', '')})",
+            icon=badge
+        ).add_to(fg)
+
+    fg.add_to(m)
+
+    legend_chips.append(
+        f'<span style="display:inline-flex; align-items:center; margin-right:14px; margin-bottom:4px; white-space:nowrap;">'
+        f'<span style="background:{color}; width:11px; height:11px; border-radius:50%; display:inline-block; margin-right:5px; border:1px solid #fff;"></span>'
+        f'<b>{d_name}:</b>&nbsp;{total_bags} bags ({total_km} km)&nbsp;'
+        f'<a href="{primary_nav_url}" target="_blank" style="color:#1a73e8; text-decoration:none; font-weight:bold;">[🗺️ Nav]</a>'
+        f'</span>'
+    )
+
+if selected_driver_filter == "Show All Drivers" and excluded_bags:
+    ex_fg = folium.FeatureGroup(name=f"🚫 Excluded Stops ({len(excluded_bags)})", show=True)
+    for ex_stop in excluded_bags:
+        lat, lon = float(ex_stop["Resolved_Lat"]), float(ex_stop["Resolved_Lon"])
+        route_coords_for_bounds.append((lat, lon))
+        is_om = "OMAN" in ex_stop["Driver_ID"]
+        icon_color = "#e65100" if is_om else "#212121"
+        label = "OUTSIDE UAE (OMAN)" if is_om else f"EXCLUDED ({ex_stop.get('Driver_ID', '')})"
+        warn_html = (
+            f'<div style="background:{icon_color}; color:#fff; border-radius:50%; '
+            f'width:24px; height:24px; text-align:center; font-weight:bold; '
+            f'font-size:11px; line-height:24px; border:2px solid #ff5252;">✕</div>'
+        )
+        warn_badge = folium.DivIcon(html=warn_html, icon_size=(24, 24), icon_anchor=(12, 12))
+        folium.Marker(
+            location=[lat, lon],
+            popup=f"<b>🚫 {label}</b><br>Bag: {ex_stop.get(bag_col, '')}",
+            tooltip=f"🚫 {label}: {ex_stop.get(bag_col, '')}",
+            icon=warn_badge
+        ).add_to(ex_fg)
+    ex_fg.add_to(m)
+
+if len(route_coords_for_bounds) > 1:
+    lats = [c[0] for c in route_coords_for_bounds]
+    lons = [c[1] for c in route_coords_for_bounds]
+    m.fit_bounds([[min(lats), min(lons)], [max(lats), max(lons)]], padding=(35, 35))
+
+if legend_chips:
+    bottom_bar_html = (
+        '<div style="position:fixed; bottom:10px; left:10px; right:10px; z-index:9999; '
+        'background:rgba(255,255,255,0.94); padding:7px 12px; border-radius:8px; '
+        'box-shadow:0 2px 8px rgba(0,0,0,0.25); font-family:Arial,sans-serif; '
+        'font-size:12px; display:flex; flex-wrap:wrap; align-items:center;">'
+        '<span style="margin-right:14px; font-weight:bold;">🏠 Ajman WH</span>'
+        + "".join(legend_chips) +
+        '</div>'
+    )
+    m.get_root().html.add_child(folium.Element(bottom_bar_html))
+
+folium.LayerControl(collapsed=True, position="topright").add_to(m)
+
+# Capture drawn shapes from the map
+map_output = st_folium(m, width="100%", height=750, returned_objects=["last_active_drawing"])
+
+# ==========================================
+# 9.1 LASSO SELECTION ASSIGNMENT PANEL
+# ==========================================
+def point_in_polygon(lat, lon, poly_coords):
+    """Ray-casting algorithm to check if a delivery point is inside the drawn shape."""
+    x, y = lon, lat
+    inside = False
+    n = len(poly_coords)
+    for i in range(n):
+        x1, y1 = poly_coords[i][0], poly_coords[i][1]
+        x2, y2 = poly_coords[(i + 1) % n][0], poly_coords[(i + 1) % n][1]
+        if ((y1 > y) != (y2 > y)) and (x < (x2 - x1) * (y - y1) / (y2 - y1 + 1e-12) + x1):
+            inside = not inside
+    return inside
+
+active_drawing = map_output.get("last_active_drawing") if map_output else None
+if active_drawing and active_drawing.get("geometry"):
+    geom_type = active_drawing["geometry"]["type"]
+    geom_coords = active_drawing["geometry"]["coordinates"]
+
+    # Normalize polygon coordinates format
+    poly_pts = []
+    if geom_type == "Polygon":
+        poly_pts = [(pt[1], pt[0]) for pt in geom_coords[0]] # convert to (lat, lon)
+    elif geom_type == "Rectangle" or geom_type == "Point": 
+        # Handled via bounding box if polygon coords are structured differently
+        pass
+
+    if poly_pts:
+        selected_bags_in_lasso = []
+        for r in master_rows:
+            if r.get("Resolved_Lat"):
+                if point_in_polygon(float(r["Resolved_Lat"]), float(r["Resolved_Lon"]), [(p[1], p[0]) for p in poly_pts]):
+                    selected_bags_in_lasso.append(r)
+
+        if selected_bags_in_lasso:
+            st.success(f"🎯 **{len(selected_bags_in_lasso)} bag(s) captured inside your drawn shape!**")
+            col_l1, col_l2 = st.columns([2, 1])
+            lasso_target_driver = col_l1.selectbox("Assign Selected Bags To:", options=active_driver_ids, key="lasso_drv_target")
+            if col_l2.button("⚡ Assign Selected Bags & Re-Sequence"):
+                for sel_bag in selected_bags_in_lasso:
+                    bag_code_val = sel_bag.get(bag_col, "")
+                    for row in master_rows:
+                        if row.get(bag_col) == bag_code_val:
+                            row["Driver_ID"] = lasso_target_driver
+                            row["Assigned_Driver"] = lasso_target_driver.split(" (")[0]
+                            row["Dispatch_Status"] = "ASSIGNED_LASSO_SELECTION"
+
+                # Re-sequence affected drivers
+                for drv_to_fix in set([sel_bag.get("Driver_ID") for sel_bag in selected_bags_in_lasso]):
+                    d_indices = [i for i, r in enumerate(master_rows) if r.get("Driver_ID") == drv_to_fix]
+                    d_rows = [master_rows[i] for i in d_indices]
+                    updated_rows = resequence_driver_stops(d_rows, wh_lat, wh_lon)
+                    for i, updated_row in zip(d_indices, updated_rows):
+                        master_rows[i] = updated_row
+
+                st.session_state["dispatch_data"] = master_rows
+                st.success("✅ Successfully reassigned and re-sequenced routes!")
+                st.rerun()
