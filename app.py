@@ -1197,119 +1197,179 @@ def build_google_maps_nav_links(wh_lat, wh_lon, stops):
 
 
 # ==========================================
-# V3 FEATURE: UAE STATE & CORRIDOR GRID OVERLAY
+# V3 FEATURE: REAL UAE EMIRATE & REGION BORDERS (GEOJSON)
 # ==========================================
-UAE_DISPATCH_ZONES = [
+UAE_EMIRATE_SPECS = [
     {
         "name": "ABU DHABI",
+        "queries": ["Abu Dhabi Emirate, United Arab Emirates", "Abu Dhabi, United Arab Emirates"],
         "color": "#0284c7",
-        "label_pos": (24.38, 54.55),
-        "coords": [
-            (22.80, 51.50), (25.00, 51.50), (25.00, 54.95), (24.78, 54.95),
-            (24.78, 55.35), (24.58, 55.35), (24.58, 55.20), (24.40, 55.20),
-            (24.40, 55.35), (22.80, 55.35)
-        ]
+        "label_pos": (24.35, 54.55),
     },
     {
-        "name": "AL AIN (+ RUGA / SWEIHAN)",
+        "name": "AL AIN",
+        "queries": ["Al Ain Region, United Arab Emirates", "Al Ain Municipality, United Arab Emirates", "Al Ain, Abu Dhabi, United Arab Emirates"],
         "color": "#d97706",
-        "label_pos": (24.32, 55.62),
-        "coords": [
-            (23.95, 55.35), (24.40, 55.35), (24.40, 55.20), (24.58, 55.20),
-            (24.58, 55.45), (24.75, 55.45), (24.75, 55.70), (24.72, 55.70),
-            (24.72, 55.98), (23.95, 55.98)
-        ]
-    },
-    {
-        "name": "FUJAIRAH / EAST COAST (E102 / HATTA / MLEIHA)",
-        "color": "#7c3aed",
-        "label_pos": (25.15, 56.08),
-        "coords": [
-            (24.72, 55.70), (25.58, 55.70), (25.58, 56.12), (25.68, 56.12),
-            (25.68, 56.38), (24.72, 56.38)
-        ]
+        "label_pos": (24.22, 55.74),
     },
     {
         "name": "DUBAI",
+        "queries": ["Dubai Emirate, United Arab Emirates", "Dubai, United Arab Emirates"],
         "color": "#2563eb",
-        "label_pos": (25.05, 55.24),
-        "coords": [
-            (24.78, 54.95), (25.25, 54.95), (25.25, 55.56), (25.32, 55.56),
-            (25.32, 55.60), (24.75, 55.60), (24.75, 55.35), (24.78, 55.35)
-        ]
+        "label_pos": (25.10, 55.28),
     },
     {
-        "name": "SHARJAH (CITY)",
+        "name": "SHARJAH",
+        "queries": ["Sharjah Emirate, United Arab Emirates", "Sharjah, United Arab Emirates"],
         "color": "#059669",
-        "label_pos": (25.31, 55.45),
-        "coords": [
-            (25.25, 55.34), (25.48, 55.34), (25.48, 55.40), (25.365, 55.40),
-            (25.365, 55.56), (25.25, 55.56)
-        ]
-    },
-    {
-        "name": "SHARJAH (FAR INLAND)",
-        "color": "#64748b",
-        "label_pos": (25.12, 55.63),
-        "coords": [
-            (24.75, 55.60), (25.32, 55.60), (25.32, 55.56), (25.365, 55.56),
-            (25.365, 55.58), (25.48, 55.58), (25.48, 55.70), (24.75, 55.70)
-        ]
+        "label_pos": (25.33, 55.52),
     },
     {
         "name": "AJMAN",
+        "queries": ["Ajman Emirate, United Arab Emirates", "Ajman, United Arab Emirates"],
         "color": "#dc2626",
-        "label_pos": (25.42, 55.49),
-        "coords": [
-            (25.365, 55.40), (25.48, 55.40), (25.48, 55.58), (25.365, 55.58)
-        ]
+        "label_pos": (25.41, 55.48),
     },
     {
         "name": "UMM AL QUWAIN",
+        "queries": ["Umm Al Quwain Emirate, United Arab Emirates", "Umm Al Quwain, United Arab Emirates"],
         "color": "#0d9488",
-        "label_pos": (25.55, 55.60),
-        "coords": [
-            (25.48, 55.50), (25.62, 55.50), (25.62, 55.65), (25.58, 55.65),
-            (25.58, 55.70), (25.48, 55.70)
-        ]
+        "label_pos": (25.55, 55.62),
     },
     {
         "name": "RAS AL KHAIMAH",
+        "queries": ["Ras Al Khaimah Emirate, United Arab Emirates", "Ras Al Khaimah, United Arab Emirates"],
         "color": "#9333ea",
-        "label_pos": (25.80, 55.90),
-        "coords": [
-            (25.58, 55.65), (26.08, 55.65), (26.08, 56.12), (25.58, 56.12)
-        ]
-    }
+        "label_pos": (25.78, 55.96),
+    },
+    {
+        "name": "FUJAIRAH",
+        "queries": ["Fujairah Emirate, United Arab Emirates", "Fujairah, United Arab Emirates"],
+        "color": "#7c3aed",
+        "label_pos": (25.14, 56.28),
+    },
 ]
 
 
-def add_uae_state_grid_to_map(m, show_by_default=True):
-    grid_fg = folium.FeatureGroup(name="🗺️ State & Dispatch Zone Borders", show=show_by_default)
+def _extract_al_ain_from_abudhabi_geojson(ad_geojson):
+    def clip_ring(ring):
+        clipped = []
+        for lon, lat in ring:
+            in_ruga = (24.40 <= lat <= 24.58 and lon >= 55.20)
+            if lon >= 55.32 or in_ruga:
+                clipped.append([lon, lat])
+            elif lat >= 23.90 and lon >= 55.00:
+                clipped.append([55.32, lat])
+        return clipped if len(clipped) >= 4 else []
 
-    for z in UAE_DISPATCH_ZONES:
-        folium.Polygon(
-            locations=z["coords"],
-            color=z["color"],
-            weight=2.5,
-            dash_array="7, 6",
-            fill=True,
-            fill_color=z["color"],
-            fill_opacity=0.06,
+    g_type = ad_geojson.get("type")
+    coords = ad_geojson.get("coordinates", [])
+    new_polys = []
+
+    if g_type == "Polygon" and coords:
+        outer = clip_ring(coords[0])
+        if outer:
+            new_polys.append([outer])
+    elif g_type == "MultiPolygon":
+        for poly in coords:
+            if poly:
+                outer = clip_ring(poly[0])
+                if outer:
+                    new_polys.append([outer])
+
+    if new_polys:
+        return {"type": "MultiPolygon", "coordinates": new_polys}
+    return None
+
+
+@st.cache_data(ttl=86400 * 7, show_spinner=False)
+def fetch_uae_real_borders_geojson():
+    osm_headers = {
+        "User-Agent": "LionDeliveryDispatchV3/3.0 (uae-state-borders; contact@liondelivery.ae)",
+        "Accept": "application/json"
+    }
+    results = []
+    abudhabi_geom = None
+
+    for spec in UAE_EMIRATE_SPECS:
+        found_geom = None
+        for q in spec["queries"]:
+            try:
+                url = (
+                    "https://nominatim.openstreetmap.org/search?"
+                    f"q={urllib.parse.quote(q)}&countrycodes=ae&format=json"
+                    "&polygon_geojson=1&polygon_threshold=0.0015&limit=5"
+                )
+                resp = requests.get(url, headers=osm_headers, timeout=10)
+                if resp.status_code == 200:
+                    hits = resp.json()
+                    for h in hits:
+                        gj = h.get("geojson", {})
+                        if gj.get("type") in ("Polygon", "MultiPolygon"):
+                            bbox = [float(x) for x in h.get("boundingbox", [0, 0, 0, 0])]
+                            span = abs(bbox[1] - bbox[0]) + abs(bbox[3] - bbox[2])
+                            if spec["name"] == "AL AIN" and span < 0.25:
+                                continue
+                            found_geom = gj
+                            break
+                if found_geom:
+                    break
+            except Exception:
+                pass
+
+        if spec["name"] == "ABU DHABI" and found_geom:
+            abudhabi_geom = found_geom
+
+        if spec["name"] == "AL AIN" and not found_geom and abudhabi_geom:
+            found_geom = _extract_al_ain_from_abudhabi_geojson(abudhabi_geom)
+
+        if found_geom:
+            results.append({
+                "name": spec["name"],
+                "color": spec["color"],
+                "label_pos": spec["label_pos"],
+                "geojson": found_geom
+            })
+
+    return results
+
+
+def add_uae_state_grid_to_map(m, show_by_default=True):
+    grid_fg = folium.FeatureGroup(name="🗺️ UAE Emirate Borders (Real GeoJSON)", show=show_by_default)
+    borders = fetch_uae_real_borders_geojson()
+
+    for item in borders:
+        state_color = item["color"]
+        feature = {
+            "type": "Feature",
+            "properties": {"name": item["name"], "color": state_color},
+            "geometry": item["geojson"]
+        }
+
+        folium.GeoJson(
+            feature,
+            style_function=lambda feat, c=state_color: {
+                "color": c,
+                "weight": 2.5,
+                "opacity": 0.9,
+                "dashArray": "6, 4",
+                "fillColor": c,
+                "fillOpacity": 0.06,
+            },
             interactive=False
         ).add_to(grid_fg)
 
         label_html = (
-            f'<div style="display:inline-block; background:rgba(255,255,255,0.85); '
-            f'color:{z["color"]}; border:1.5px solid {z["color"]}; border-radius:4px; '
+            f'<div style="display:inline-block; background:rgba(255,255,255,0.88); '
+            f'color:{state_color}; border:1.5px solid {state_color}; border-radius:4px; '
             f'padding:2px 6px; font-family:Arial,sans-serif; font-size:10px; '
             f'font-weight:800; white-space:nowrap; pointer-events:none; '
-            f'box-shadow:0 1px 3px rgba(0,0,0,0.2);">'
-            f'{z["name"]}</div>'
+            f'box-shadow:0 1px 3px rgba(0,0,0,0.25);">'
+            f'{item["name"]}</div>'
         )
         folium.Marker(
-            location=z["label_pos"],
-            icon=folium.DivIcon(html=label_html, icon_size=(160, 22), icon_anchor=(80, 11))
+            location=item["label_pos"],
+            icon=folium.DivIcon(html=label_html, icon_size=(130, 22), icon_anchor=(65, 11))
         ).add_to(grid_fg)
 
     grid_fg.add_to(m)
@@ -1321,14 +1381,14 @@ def add_uae_state_grid_to_map(m, show_by_default=True):
 db_stats = get_recent_driver_stats()
 default_far_yesterday = [d for d, st_info in db_stats.items() if st_info["went_far_yesterday"]]
 
-st.sidebar.title("🧪 V3 LAB — Dispatch & State Grid")
+st.sidebar.title("🧪 V3 LAB — Dispatch & Real Borders")
 
 selected_driver_filter = st.sidebar.selectbox(
     "🔍 View Driver on Map",
     options=["Show All Drivers"] + FLEET_DRIVERS,
     index=0
 )
-show_state_grid = st.sidebar.checkbox("🗺️ Show State / Zone Borders on Map", value=True)
+show_state_grid = st.sidebar.checkbox("🗺️ Show Real Emirate Borders on Map", value=True)
 
 st.sidebar.markdown("### 📂 1. Load Delivery Orders")
 data_source = st.sidebar.radio(
@@ -1463,7 +1523,7 @@ if not raw_rows:
     st.stop()
 
 current_config_sig = (
-    "v3.0_state_grid_clean",
+    "v3.0_real_geojson_borders",
     source_name,
     raw_bytes_len,
     target_drivers_input,
@@ -1764,7 +1824,7 @@ with ctrl_tab2:
             st.rerun()
 
 # ==========================================
-# 9. LARGE MAP RENDER (WITH V3 STATE GRID OVERLAY)
+# 9. LARGE MAP RENDER (WITH REAL GEOJSON EMIRATE BORDERS)
 # ==========================================
 m = folium.Map(location=[wh_lat, wh_lon], zoom_start=9, tiles=None, control_scale=True)
 Fullscreen(position="topleft", force_separate_button=True).add_to(m)
