@@ -1589,7 +1589,6 @@ m = folium.Map(location=[wh_lat, wh_lon], zoom_start=9, tiles=None, control_scal
 Fullscreen(position="topleft", force_separate_button=True).add_to(m)
 
 folium.TileLayer(
-    add_uae_state_grid_to_map(m, show_by_default=show_state_grid)
     "https://mt1.google.com/vt/lyrs=m&x={x}&y={y}&z={z}",
     attr="Google Maps",
     name="Google Maps (Streets)",
@@ -1612,6 +1611,8 @@ folium.TileLayer(
     overlay=False,
     control=True
 ).add_to(m)
+
+add_uae_state_grid_to_map(m, show_by_default=show_state_grid)
 
 folium.Marker(
     location=[wh_lat, wh_lon],
