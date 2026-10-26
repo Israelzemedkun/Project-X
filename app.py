@@ -1,4 +1,4 @@
-﻿import base64
+import base64
 import csv
 import html
 import io
@@ -16,10 +16,10 @@ import streamlit as st
 from streamlit_folium import st_folium
 
 # ==========================================
-# PAGE CONFIGURATION (VERSION 3.0)
+# PAGE CONFIGURATION (VERSION 3.1)
 # ==========================================
 st.set_page_config(
-    page_title="Lion Delivery Dispatch v3.0",
+    page_title="Lion Delivery Dispatch v3.1",
     page_icon="🚚",
     layout="wide"
 )
@@ -963,6 +963,9 @@ def build_v2_morning_routes(
     overall_target = min(max(target_drivers, min_fleet_needed), len(FLEET_DRIVERS))
     target_local_count = max(1, overall_target - len(distant_routes))
 
+    # Pre-compute per-route KM once to avoid redundant optimize_route_order calls inside O(n²) loop
+    route_km_cache = {id(r): optimize_route_order(r, dist_matrix, city_list)[1] for r in local_routes}
+
     for same_area_only in [True, False]:
         while len(local_routes) > target_local_count:
             best_pair, best_score = None, -float("inf")
@@ -977,8 +980,8 @@ def build_v2_morning_routes(
                     if not are_cities_compatible_v2(c_a, c_b):
                         continue
 
-                    _, km_a = optimize_route_order(r_a, dist_matrix, city_list)
-                    _, km_b = optimize_route_order(r_b, dist_matrix, city_list)
+                    km_a = route_km_cache.get(id(r_a), optimize_route_order(r_a, dist_matrix, city_list)[1])
+                    km_b = route_km_cache.get(id(r_b), optimize_route_order(r_b, dist_matrix, city_list)[1])
                     _, km_comb = optimize_route_order(r_a + r_b, dist_matrix, city_list)
 
                     if km_comb <= max_route_km:
@@ -991,9 +994,11 @@ def build_v2_morning_routes(
 
             if best_pair is not None:
                 i_a, i_b = best_pair
-                local_routes[i_a] = optimize_route_order(
+                merged_route = optimize_route_order(
                     local_routes[i_a] + local_routes[i_b], dist_matrix, city_list
-                )[0]
+                )
+                local_routes[i_a] = merged_route[0]
+                route_km_cache[id(local_routes[i_a])] = merged_route[1]
                 local_routes.pop(i_b)
             else:
                 break
@@ -1334,45 +1339,7 @@ def fetch_uae_real_borders_geojson():
     return results
 
 
-def add_uae_state_grid_to_map(m, show_by_default=True):
-    grid_fg = folium.FeatureGroup(name="🗺️ UAE Emirate Borders (Real GeoJSON)", show=show_by_default)
-    borders = fetch_uae_real_borders_geojson()
-
-    for item in borders:
-        state_color = item["color"]
-        feature = {
-            "type": "Feature",
-            "properties": {"name": item["name"], "color": state_color},
-            "geometry": item["geojson"]
-        }
-
-        folium.GeoJson(
-            feature,
-            style_function=lambda feat, c=state_color: {
-                "color": c,
-                "weight": 2.5,
-                "opacity": 0.9,
-                "dashArray": "6, 4",
-                "fillColor": c,
-                "fillOpacity": 0.06,
-            },
-            interactive=False
-        ).add_to(grid_fg)
-
-        label_html = (
-            f'<div style="display:inline-block; background:rgba(255,255,255,0.88); '
-            f'color:{state_color}; border:1.5px solid {state_color}; border-radius:4px; '
-            f'padding:2px 6px; font-family:Arial,sans-serif; font-size:10px; '
-            f'font-weight:800; white-space:nowrap; pointer-events:none; '
-            f'box-shadow:0 1px 3px rgba(0,0,0,0.25);">'
-            f'{item["name"]}</div>'
-        )
-        folium.Marker(
-            location=item["label_pos"],
-            icon=folium.DivIcon(html=label_html, icon_size=(130, 22), icon_anchor=(65, 11))
-        ).add_to(grid_fg)
-
-    grid_fg.add_to(m)
+# (add_uae_state_grid_to_map removed — use add_uae_state_grid_to_map_custom instead)
 
 
 # ==========================================
@@ -1426,11 +1393,11 @@ else:
     secret_pass = ""
     secret_token = ""
     try:
-        secret_email = st.secrets.get("LION_EMAIL", "sole@gmail.com")
+        secret_email = st.secrets.get("LION_EMAIL", "")
         secret_pass = st.secrets.get("LION_PASSWORD", "")
         secret_token = st.secrets.get("LION_API_TOKEN", "")
     except Exception:
-        secret_email = "sole@gmail.com"
+        secret_email = ""
 
     ld_user = st.sidebar.text_input("Lion Delivery Email", value=secret_email)
     ld_pass = st.sidebar.text_input("Lion Delivery Password", value=secret_pass, type="password")
@@ -1503,6 +1470,7 @@ max_bags_local_input = st.sidebar.slider("Max Bags (Local Driver - DXB/SHJ)", mi
 max_bags_distant_input = st.sidebar.slider("Target Cap (Distant Driver w/ Backfill)", min_value=14, max_value=19, value=16)
 min_bags_input = st.sidebar.slider("Min Bags per Driver (Combine / Backfill)", min_value=6, max_value=12, value=10)
 max_dist_input = st.sidebar.number_input("Max Warehouse Road Distance (KM)", value=260.0, step=10.0)
+max_route_km_input = st.sidebar.number_input("Max Total Route Length (KM)", value=600.0, step=25.0, help="Hard cap on a single driver's one-way route distance.")
 
 
 # ==========================================
@@ -1529,7 +1497,7 @@ if not raw_rows:
     st.stop()
 
 current_config_sig = (
-    "v3.0_real_geojson_borders",
+    "v3.1_real_geojson_borders",
     source_name,
     raw_bytes_len,
     target_drivers_input,
@@ -1537,6 +1505,7 @@ current_config_sig = (
     max_bags_distant_input,
     min_bags_input,
     max_dist_input,
+    max_route_km_input,
     tuple(sorted(far_yesterday_input)),
     tuple(sorted(resting_today_input))
 )
@@ -1602,7 +1571,7 @@ if (
             max_local_bags=max_bags_local_input,
             max_distant_bags=max_bags_distant_input,
             min_driver_bags=min_bags_input,
-            max_route_km=600.0
+            max_route_km=max_route_km_input
         )
 
         driver_route_pairs = assign_drivers_with_rotation(
@@ -2067,14 +2036,14 @@ for d_name in active_driver_ids:
 
 
 
-
 # ==========================================
-# 9. LARGE MAP RENDER (WITH DRAW / LASSO SELECTOR)
+# 10. LASSO / DRAW SELECTOR MAP
 # ==========================================
-m = folium.Map(location=[wh_lat, wh_lon], zoom_start=9, tiles=None, control_scale=True)
-Fullscreen(position="topleft", force_separate_button=True).add_to(m)
+st.subheader("🖊️ Lasso Select: Draw on Map to Reassign Bags")
+m2 = folium.Map(location=[wh_lat, wh_lon], zoom_start=9, tiles=None, control_scale=True)
+Fullscreen(position="topleft", force_separate_button=True).add_to(m2)
 
-# Enable Rectangle and Polygon drawing tools for selection
+# Enable Rectangle and Polygon drawing tools for lasso selection
 Draw(
     export=False,
     position="topleft",
@@ -2087,7 +2056,7 @@ Draw(
         "rectangle": True,
     },
     edit_options={"edit": False}
-).add_to(m)
+).add_to(m2)
 
 folium.TileLayer(
     "https://mt1.google.com/vt/lyrs=m&x={x}&y={y}&z={z}",
@@ -2095,7 +2064,7 @@ folium.TileLayer(
     name="Google Maps (Streets)",
     overlay=False,
     control=True
-).add_to(m)
+).add_to(m2)
 
 folium.TileLayer(
     "https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}",
@@ -2103,7 +2072,7 @@ folium.TileLayer(
     name="Esri Street Map",
     overlay=False,
     control=True
-).add_to(m)
+).add_to(m2)
 
 folium.TileLayer(
     "https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}",
@@ -2111,20 +2080,19 @@ folium.TileLayer(
     name="Google Satellite + Roads",
     overlay=False,
     control=True
-).add_to(m)
+).add_to(m2)
 
-add_uae_state_grid_to_map(m, show_by_default=show_state_grid)
+add_uae_state_grid_to_map_custom(m2, show_by_default=show_state_grid, fill_op=border_opacity)
 
 folium.Marker(
     location=[wh_lat, wh_lon],
     popup="<b>Ajman Warehouse (6:30 AM Start)</b>",
     tooltip="Ajman Warehouse",
     icon=folium.Icon(color="black", icon="home", prefix="fa")
-).add_to(m)
+).add_to(m2)
 
-route_coords_for_bounds = [(wh_lat, wh_lon)]
-legend_chips = []
-seen_marker_coords = {}
+lasso_route_bounds = [(wh_lat, wh_lon)]
+lasso_seen_coords = {}
 
 for d_idx, d_name in enumerate(active_driver_ids):
     if selected_driver_filter != "Show All Drivers" and selected_driver_filter.lower() not in d_name.lower():
@@ -2139,24 +2107,20 @@ for d_idx, d_name in enumerate(active_driver_ids):
 
     total_bags = d_stops[0].get("Route_Total_Bags", len(d_stops))
     total_km = d_stops[0].get("Route_OneWay_KM", "0")
-    nav_links = build_google_maps_nav_links(wh_lat, wh_lon, d_stops)
-    primary_nav_url = nav_links[0][1] if nav_links else "#"
 
-    fg = folium.FeatureGroup(name=f"{d_name} ({total_bags} bags | {total_km} km)", show=True)
+    fg2 = folium.FeatureGroup(name=f"{d_name} ({total_bags} bags | {total_km} km)", show=True)
+    waypoints2 = [(wh_lat, wh_lon)] + [(float(s["Resolved_Lat"]), float(s["Resolved_Lon"])) for s in d_stops]
+    for pt in waypoints2:
+        lasso_route_bounds.append(pt)
 
-    waypoints = [(wh_lat, wh_lon)] + [(float(s["Resolved_Lat"]), float(s["Resolved_Lon"])) for s in d_stops]
-    for pt in waypoints:
-        route_coords_for_bounds.append(pt)
-
-    road_polyline = get_osrm_route_geometry(waypoints)
-    AntPath(locations=road_polyline, color=color, weight=5, opacity=0.88, tooltip=d_name).add_to(fg)
+    road_polyline2 = get_osrm_route_geometry(waypoints2)
+    AntPath(locations=road_polyline2, color=color, weight=5, opacity=route_line_opacity, tooltip=d_name).add_to(fg2)
 
     for s in d_stops:
         raw_lat, raw_lon = float(s["Resolved_Lat"]), float(s["Resolved_Lon"])
         coord_key = (round(raw_lat, 5), round(raw_lon, 5))
-        dup_count = seen_marker_coords.get(coord_key, 0)
-        seen_marker_coords[coord_key] = dup_count + 1
-
+        dup_count = lasso_seen_coords.get(coord_key, 0)
+        lasso_seen_coords[coord_key] = dup_count + 1
         disp_lat = raw_lat + (dup_count * 0.00014)
         disp_lon = raw_lon + (dup_count * 0.00014)
 
@@ -2172,7 +2136,7 @@ for d_idx, d_name in enumerate(active_driver_ids):
             f'box-shadow:0 2px 4px rgba(0,0,0,0.4);">'
             f'{s["Stop_Sequence"]}</div>'
         )
-        badge = folium.DivIcon(html=badge_html, icon_size=(24, 24), icon_anchor=(12, 12))
+        badge2 = folium.DivIcon(html=badge_html, icon_size=(24, 24), icon_anchor=(12, 12))
         popup_html = (
             f'<div style="font-family:Arial,sans-serif; font-size:12px; min-width:200px;">'
             f'<b>{d_name} — Stop #{s["Stop_Sequence"]}</b><br>'
@@ -2185,74 +2149,31 @@ for d_idx, d_name in enumerate(active_driver_ids):
             location=[disp_lat, disp_lon],
             popup=folium.Popup(popup_html, max_width=280),
             tooltip=f"{s.get(bag_col, '')} • Stop #{s['Stop_Sequence']} ({s.get('City_Area', '')})",
-            icon=badge
-        ).add_to(fg)
+            icon=badge2
+        ).add_to(fg2)
+    fg2.add_to(m2)
 
-    fg.add_to(m)
+if len(lasso_route_bounds) > 1:
+    lats2 = [c[0] for c in lasso_route_bounds]
+    lons2 = [c[1] for c in lasso_route_bounds]
+    m2.fit_bounds([[min(lats2), min(lons2)], [max(lats2), max(lons2)]], padding=(35, 35))
 
-    legend_chips.append(
-        f'<span style="display:inline-flex; align-items:center; margin-right:14px; margin-bottom:4px; white-space:nowrap;">'
-        f'<span style="background:{color}; width:11px; height:11px; border-radius:50%; display:inline-block; margin-right:5px; border:1px solid #fff;"></span>'
-        f'<b>{d_name}:</b>&nbsp;{total_bags} bags ({total_km} km)&nbsp;'
-        f'<a href="{primary_nav_url}" target="_blank" style="color:#1a73e8; text-decoration:none; font-weight:bold;">[🗺️ Nav]</a>'
-        f'</span>'
-    )
+folium.LayerControl(collapsed=True, position="topright").add_to(m2)
 
-if selected_driver_filter == "Show All Drivers" and excluded_bags:
-    ex_fg = folium.FeatureGroup(name=f"🚫 Excluded Stops ({len(excluded_bags)})", show=True)
-    for ex_stop in excluded_bags:
-        lat, lon = float(ex_stop["Resolved_Lat"]), float(ex_stop["Resolved_Lon"])
-        route_coords_for_bounds.append((lat, lon))
-        is_om = "OMAN" in ex_stop["Driver_ID"]
-        icon_color = "#e65100" if is_om else "#212121"
-        label = "OUTSIDE UAE (OMAN)" if is_om else f"EXCLUDED ({ex_stop.get('Driver_ID', '')})"
-        warn_html = (
-            f'<div style="background:{icon_color}; color:#fff; border-radius:50%; '
-            f'width:24px; height:24px; text-align:center; font-weight:bold; '
-            f'font-size:11px; line-height:24px; border:2px solid #ff5252;">✕</div>'
-        )
-        warn_badge = folium.DivIcon(html=warn_html, icon_size=(24, 24), icon_anchor=(12, 12))
-        folium.Marker(
-            location=[lat, lon],
-            popup=f"<b>🚫 {label}</b><br>Bag: {ex_stop.get(bag_col, '')}",
-            tooltip=f"🚫 {label}: {ex_stop.get(bag_col, '')}",
-            icon=warn_badge
-        ).add_to(ex_fg)
-    ex_fg.add_to(m)
-
-if len(route_coords_for_bounds) > 1:
-    lats = [c[0] for c in route_coords_for_bounds]
-    lons = [c[1] for c in route_coords_for_bounds]
-    m.fit_bounds([[min(lats), min(lons)], [max(lats), max(lons)]], padding=(35, 35))
-
-if legend_chips:
-    bottom_bar_html = (
-        '<div style="position:fixed; bottom:10px; left:10px; right:10px; z-index:9999; '
-        'background:rgba(255,255,255,0.94); padding:7px 12px; border-radius:8px; '
-        'box-shadow:0 2px 8px rgba(0,0,0,0.25); font-family:Arial,sans-serif; '
-        'font-size:12px; display:flex; flex-wrap:wrap; align-items:center;">'
-        '<span style="margin-right:14px; font-weight:bold;">🏠 Ajman WH</span>'
-        + "".join(legend_chips) +
-        '</div>'
-    )
-    m.get_root().html.add_child(folium.Element(bottom_bar_html))
-
-folium.LayerControl(collapsed=True, position="topright").add_to(m)
-
-# Capture drawn shapes from the map
-map_output = st_folium(m, width="100%", height=750, returned_objects=["last_active_drawing"])
+# Capture drawn shapes from the lasso map
+map_output = st_folium(m2, width="100%", height=600, returned_objects=["last_active_drawing"])
 
 # ==========================================
-# 9.1 LASSO SELECTION ASSIGNMENT PANEL
+# 10.1 LASSO SELECTION ASSIGNMENT PANEL
 # ==========================================
-def point_in_polygon(lat, lon, poly_coords):
-    """Ray-casting algorithm to check if a delivery point is inside the drawn shape."""
-    x, y = lon, lat
+def point_in_polygon(lat, lon, poly_coords_lonlat):
+    """Ray-casting algorithm. poly_coords_lonlat is a list of (lon, lat) tuples."""
+    x, y = lon, lat  # work in lon/lat space to match poly_coords_lonlat
     inside = False
-    n = len(poly_coords)
+    n = len(poly_coords_lonlat)
     for i in range(n):
-        x1, y1 = poly_coords[i][0], poly_coords[i][1]
-        x2, y2 = poly_coords[(i + 1) % n][0], poly_coords[(i + 1) % n][1]
+        x1, y1 = poly_coords_lonlat[i]
+        x2, y2 = poly_coords_lonlat[(i + 1) % n]
         if ((y1 > y) != (y2 > y)) and (x < (x2 - x1) * (y - y1) / (y2 - y1 + 1e-12) + x1):
             inside = not inside
     return inside
@@ -2262,20 +2183,21 @@ if active_drawing and active_drawing.get("geometry"):
     geom_type = active_drawing["geometry"]["type"]
     geom_coords = active_drawing["geometry"]["coordinates"]
 
-    # Normalize polygon coordinates format
-    poly_pts = []
+    # GeoJSON coordinates are [lon, lat]; collect as (lon, lat) tuples for ray-casting
+    poly_pts_lonlat = []
     if geom_type == "Polygon":
-        poly_pts = [(pt[1], pt[0]) for pt in geom_coords[0]] # convert to (lat, lon)
-    elif geom_type == "Rectangle" or geom_type == "Point": 
-        # Handled via bounding box if polygon coords are structured differently
-        pass
+        poly_pts_lonlat = [(pt[0], pt[1]) for pt in geom_coords[0]]
 
-    if poly_pts:
-        selected_bags_in_lasso = []
-        for r in master_rows:
-            if r.get("Resolved_Lat"):
-                if point_in_polygon(float(r["Resolved_Lat"]), float(r["Resolved_Lon"]), [(p[1], p[0]) for p in poly_pts]):
-                    selected_bags_in_lasso.append(r)
+    if poly_pts_lonlat:
+        selected_bags_in_lasso = [
+            r for r in master_rows
+            if r.get("Resolved_Lat")
+            and point_in_polygon(
+                float(r["Resolved_Lat"]),
+                float(r["Resolved_Lon"]),
+                poly_pts_lonlat
+            )
+        ]
 
         if selected_bags_in_lasso:
             st.success(f"🎯 **{len(selected_bags_in_lasso)} bag(s) captured inside your drawn shape!**")
@@ -2290,13 +2212,19 @@ if active_drawing and active_drawing.get("geometry"):
                             row["Assigned_Driver"] = lasso_target_driver.split(" (")[0]
                             row["Dispatch_Status"] = "ASSIGNED_LASSO_SELECTION"
 
-                # Re-sequence affected drivers
-                for drv_to_fix in set([sel_bag.get("Driver_ID") for sel_bag in selected_bags_in_lasso]):
+                # Re-sequence all affected drivers (old and new)
+                affected_drivers = set(
+                    sel_bag.get("Driver_ID") for sel_bag in selected_bags_in_lasso
+                ) | {lasso_target_driver}
+                for drv_to_fix in affected_drivers:
+                    if "NOT GOING" in (drv_to_fix or ""):
+                        continue
                     d_indices = [i for i, r in enumerate(master_rows) if r.get("Driver_ID") == drv_to_fix]
                     d_rows = [master_rows[i] for i in d_indices]
-                    updated_rows = resequence_driver_stops(d_rows, wh_lat, wh_lon)
-                    for i, updated_row in zip(d_indices, updated_rows):
-                        master_rows[i] = updated_row
+                    if d_rows:
+                        updated_rows = resequence_driver_stops(d_rows, wh_lat, wh_lon)
+                        for i, updated_row in zip(d_indices, updated_rows):
+                            master_rows[i] = updated_row
 
                 st.session_state["dispatch_data"] = master_rows
                 st.success("✅ Successfully reassigned and re-sequenced routes!")
