@@ -2029,8 +2029,107 @@ if legend_chips:
 folium.LayerControl(collapsed=True, position="topright").add_to(m)
 
 # Single map render — returns polygon draw events for lasso selection
-st.info("\U0001f58a\ufe0f **Lasso mode:** use the polygon or rectangle tool (top-left of map) to draw a shape around pins, then assign below.")
+st.info("✏️ **Lasso mode:** use the polygon or rectangle tool (top-left of map) to draw a shape around any pins, then assign them to any driver below.")
 map_output = st_folium(m, width="100%", height=800, returned_objects=["last_active_drawing"])
+
+# ==========================================
+# 9.1 LASSO ASSIGNMENT PANEL — directly below the map
+# ==========================================
+def point_in_polygon(lat, lon, poly_coords_lonlat):
+    """Ray-casting algorithm. poly_coords_lonlat is a list of (lon, lat) GeoJSON tuples."""
+    x, y = lon, lat
+    inside = False
+    n = len(poly_coords_lonlat)
+    for i in range(n):
+        x1, y1 = poly_coords_lonlat[i]
+        x2, y2 = poly_coords_lonlat[(i + 1) % n]
+        if ((y1 > y) != (y2 > y)) and (x < (x2 - x1) * (y - y1) / (y2 - y1 + 1e-12) + x1):
+            inside = not inside
+    return inside
+
+_active_drawing = map_output.get("last_active_drawing") if map_output else None
+if _active_drawing and _active_drawing.get("geometry"):
+    _geom_type   = _active_drawing["geometry"]["type"]
+    _geom_coords = _active_drawing["geometry"]["coordinates"]
+
+    # GeoJSON stores coordinates as [lon, lat]
+    _poly_pts = []
+    if _geom_type == "Polygon":
+        _poly_pts = [(pt[0], pt[1]) for pt in _geom_coords[0]]
+
+    if _poly_pts:
+        _lasso_hits = [
+            r for r in master_rows
+            if r.get("Resolved_Lat")
+            and point_in_polygon(
+                float(r["Resolved_Lat"]),
+                float(r["Resolved_Lon"]),
+                _poly_pts
+            )
+        ]
+
+        if _lasso_hits:
+            st.success(f"🎯 **{len(_lasso_hits)} pin(s) selected inside your shape**")
+
+            # Show a compact table of what was captured
+            st.dataframe(
+                [
+                    {
+                        "Bag": r.get(bag_col, ""),
+                        "Current Driver": r.get("Assigned_Driver", "UNASSIGNED"),
+                        "Area": r.get("City_Area", ""),
+                        "Stop #": r.get("Stop_Sequence", "-"),
+                    }
+                    for r in _lasso_hits
+                ],
+                use_container_width=True,
+                hide_index=True,
+            )
+
+            _la_col1, _la_col2 = st.columns([3, 1])
+            # All fleet drivers available — not just the ones with active routes
+            _lasso_driver = _la_col1.selectbox(
+                "Assign selected pins to driver:",
+                options=FLEET_DRIVERS,
+                key="lasso_drv_target"
+            )
+            if _la_col2.button("⚡ Assign & Re-Sequence", type="primary", use_container_width=True):
+                # Update every matching row
+                for _hit in _lasso_hits:
+                    _bag_key = _hit.get(bag_col, "")
+                    for _row in master_rows:
+                        if _row.get(bag_col) == _bag_key:
+                            _old_did = _row.get("Driver_ID", "")
+                            # Build new Driver_ID — keep corridor label if driver already has one
+                            _existing_routes = [r for r in master_rows if r.get("Assigned_Driver") == _lasso_driver]
+                            if _existing_routes:
+                                _new_did = _existing_routes[0]["Driver_ID"]
+                            else:
+                                _new_did = _lasso_driver
+                            _row["Assigned_Driver"] = _lasso_driver
+                            _row["Driver_ID"]       = _new_did
+                            _row["Dispatch_Status"] = "ASSIGNED_LASSO_SELECTION"
+
+                # Re-sequence every touched driver (old owners + new owner)
+                _touched = set(
+                    _hit.get("Assigned_Driver") for _hit in _lasso_hits
+                ) | {_lasso_driver}
+                for _drv in _touched:
+                    if not _drv or "NOT GOING" in _drv:
+                        continue
+                    _di = [i for i, r in enumerate(master_rows)
+                           if r.get("Assigned_Driver") == _drv and r.get("Resolved_Lat")]
+                    _dr = [master_rows[i] for i in _di]
+                    if _dr:
+                        _upd = resequence_driver_stops(_dr, wh_lat, wh_lon)
+                        for i, u in zip(_di, _upd):
+                            master_rows[i] = u
+
+                st.session_state["dispatch_data"] = master_rows
+                st.success(f"✅ {len(_lasso_hits)} bag(s) assigned to **{_lasso_driver}** and routes re-sequenced.")
+                st.rerun()
+        else:
+            st.info("🔍 No pins found inside the drawn shape — try drawing a larger polygon.")
 
 # ==========================================
 # 10. EXPORT & WHATSAPP CARDS
@@ -2093,73 +2192,4 @@ for d_name in active_driver_ids:
 
 
 
-# ==========================================
-# 10. LASSO ASSIGNMENT PANEL (driven by draw events on the map above)
-# ==========================================
-
-# ==========================================
-# 10.1 LASSO SELECTION ASSIGNMENT PANEL
-# ==========================================
-def point_in_polygon(lat, lon, poly_coords_lonlat):
-    """Ray-casting algorithm. poly_coords_lonlat is a list of (lon, lat) tuples."""
-    x, y = lon, lat  # work in lon/lat space to match poly_coords_lonlat
-    inside = False
-    n = len(poly_coords_lonlat)
-    for i in range(n):
-        x1, y1 = poly_coords_lonlat[i]
-        x2, y2 = poly_coords_lonlat[(i + 1) % n]
-        if ((y1 > y) != (y2 > y)) and (x < (x2 - x1) * (y - y1) / (y2 - y1 + 1e-12) + x1):
-            inside = not inside
-    return inside
-
-active_drawing = map_output.get("last_active_drawing") if map_output else None
-if active_drawing and active_drawing.get("geometry"):
-    geom_type = active_drawing["geometry"]["type"]
-    geom_coords = active_drawing["geometry"]["coordinates"]
-
-    # GeoJSON coordinates are [lon, lat]; collect as (lon, lat) tuples for ray-casting
-    poly_pts_lonlat = []
-    if geom_type == "Polygon":
-        poly_pts_lonlat = [(pt[0], pt[1]) for pt in geom_coords[0]]
-
-    if poly_pts_lonlat:
-        selected_bags_in_lasso = [
-            r for r in master_rows
-            if r.get("Resolved_Lat")
-            and point_in_polygon(
-                float(r["Resolved_Lat"]),
-                float(r["Resolved_Lon"]),
-                poly_pts_lonlat
-            )
-        ]
-
-        if selected_bags_in_lasso:
-            st.success(f"🎯 **{len(selected_bags_in_lasso)} bag(s) captured inside your drawn shape!**")
-            col_l1, col_l2 = st.columns([2, 1])
-            lasso_target_driver = col_l1.selectbox("Assign Selected Bags To:", options=active_driver_ids, key="lasso_drv_target")
-            if col_l2.button("⚡ Assign Selected Bags & Re-Sequence"):
-                for sel_bag in selected_bags_in_lasso:
-                    bag_code_val = sel_bag.get(bag_col, "")
-                    for row in master_rows:
-                        if row.get(bag_col) == bag_code_val:
-                            row["Driver_ID"] = lasso_target_driver
-                            row["Assigned_Driver"] = lasso_target_driver.split(" (")[0]
-                            row["Dispatch_Status"] = "ASSIGNED_LASSO_SELECTION"
-
-                # Re-sequence all affected drivers (old and new)
-                affected_drivers = set(
-                    sel_bag.get("Driver_ID") for sel_bag in selected_bags_in_lasso
-                ) | {lasso_target_driver}
-                for drv_to_fix in affected_drivers:
-                    if "NOT GOING" in (drv_to_fix or ""):
-                        continue
-                    d_indices = [i for i, r in enumerate(master_rows) if r.get("Driver_ID") == drv_to_fix]
-                    d_rows = [master_rows[i] for i in d_indices]
-                    if d_rows:
-                        updated_rows = resequence_driver_stops(d_rows, wh_lat, wh_lon)
-                        for i, updated_row in zip(d_indices, updated_rows):
-                            master_rows[i] = updated_row
-
-                st.session_state["dispatch_data"] = master_rows
-                st.success("✅ Successfully reassigned and re-sequenced routes!")
-                st.rerun()
+# (lasso panel now lives directly below the map — see section 9.1)
