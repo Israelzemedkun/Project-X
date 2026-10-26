@@ -1820,14 +1820,6 @@ Draw(
 ).add_to(m)
 
 folium.TileLayer(
-    "https://mt1.google.com/vt/lyrs=m&x={x}&y={y}&z={z}",
-    attr="Google Maps",
-    name="Google Maps (Streets)",
-    overlay=False,
-    control=True
-).add_to(m)
-
-folium.TileLayer(
     "https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}",
     attr="Esri",
     name="Esri Street Map",
@@ -1839,6 +1831,15 @@ folium.TileLayer(
     "https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}",
     attr="Google Satellite",
     name="Google Satellite + Roads",
+    overlay=False,
+    control=True
+).add_to(m)
+
+# Google Streets is added LAST so Leaflet renders it on top by default
+folium.TileLayer(
+    "https://mt1.google.com/vt/lyrs=m&x={x}&y={y}&z={z}",
+    attr="Google Maps",
+    name="Google Maps (Streets)",
     overlay=False,
     control=True
 ).add_to(m)
@@ -2094,36 +2095,51 @@ if _active_drawing and _active_drawing.get("geometry"):
                 key="lasso_drv_target"
             )
             if _la_col2.button("⚡ Assign & Re-Sequence", type="primary", use_container_width=True):
-                # Update every matching row
+                # ██ SNAPSHOT old driver names BEFORE we modify any rows.
+                # _lasso_hits holds references into master_rows, so once we
+                # overwrite Assigned_Driver below, the old value is gone.
+                _old_drivers = {
+                    _hit.get("Assigned_Driver")
+                    for _hit in _lasso_hits
+                    if _hit.get("Assigned_Driver") and "NOT GOING" not in (_hit.get("Assigned_Driver") or "")
+                }
+
+                # Determine the Driver_ID to stamp on new rows.
+                # Use the existing Driver_ID for _lasso_driver if they already
+                # have stops (preserves corridor label); otherwise plain name.
+                _existing_for_new = [
+                    r for r in master_rows
+                    if r.get("Assigned_Driver") == _lasso_driver
+                    and r.get("Bag_Number") not in {h.get("Bag_Number") for h in _lasso_hits}
+                ]
+                _new_did = _existing_for_new[0]["Driver_ID"] if _existing_for_new else _lasso_driver
+
+                # Update every matching row in master_rows
                 for _hit in _lasso_hits:
                     _bag_key = _hit.get(bag_col, "")
                     for _row in master_rows:
                         if _row.get(bag_col) == _bag_key:
-                            _old_did = _row.get("Driver_ID", "")
-                            # Build new Driver_ID — keep corridor label if driver already has one
-                            _existing_routes = [r for r in master_rows if r.get("Assigned_Driver") == _lasso_driver]
-                            if _existing_routes:
-                                _new_did = _existing_routes[0]["Driver_ID"]
-                            else:
-                                _new_did = _lasso_driver
                             _row["Assigned_Driver"] = _lasso_driver
                             _row["Driver_ID"]       = _new_did
                             _row["Dispatch_Status"] = "ASSIGNED_LASSO_SELECTION"
 
-                # Re-sequence every touched driver (old owners + new owner)
-                _touched = set(
-                    _hit.get("Assigned_Driver") for _hit in _lasso_hits
-                ) | {_lasso_driver}
+                # Re-sequence ALL touched drivers — old ones lose bags, new one gains them
+                _touched = _old_drivers | {_lasso_driver}
                 for _drv in _touched:
                     if not _drv or "NOT GOING" in _drv:
                         continue
-                    _di = [i for i, r in enumerate(master_rows)
-                           if r.get("Assigned_Driver") == _drv and r.get("Resolved_Lat")]
+                    _di = [
+                        i for i, r in enumerate(master_rows)
+                        if r.get("Assigned_Driver") == _drv and r.get("Resolved_Lat")
+                    ]
                     _dr = [master_rows[i] for i in _di]
                     if _dr:
                         _upd = resequence_driver_stops(_dr, wh_lat, wh_lon)
                         for i, u in zip(_di, _upd):
                             master_rows[i] = u
+                    else:
+                        # Driver now has zero stops — nothing to resequence, counts are 0
+                        pass
 
                 st.session_state["dispatch_data"] = master_rows
                 st.success(f"✅ {len(_lasso_hits)} bag(s) assigned to **{_lasso_driver}** and routes re-sequenced.")
