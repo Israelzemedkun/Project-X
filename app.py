@@ -1799,10 +1799,25 @@ with ctrl_tab2:
             st.rerun()
 
 # ==========================================
-# 9. LARGE MAP RENDER (WITH OPACITY CONTROLS)
+# 9. UNIFIED MAP — ROUTES + POLYGON DRAW SELECTOR
 # ==========================================
 m = folium.Map(location=[wh_lat, wh_lon], zoom_start=9, tiles=None, control_scale=True)
 Fullscreen(position="topleft", force_separate_button=True).add_to(m)
+
+# Polygon & rectangle draw tool for lasso bag selection
+Draw(
+    export=False,
+    position="topleft",
+    draw_options={
+        "polyline": False,
+        "polygon": True,
+        "circle": False,
+        "marker": False,
+        "circlemarker": False,
+        "rectangle": True,
+    },
+    edit_options={"edit": False}
+).add_to(m)
 
 folium.TileLayer(
     "https://mt1.google.com/vt/lyrs=m&x={x}&y={y}&z={z}",
@@ -1972,8 +1987,50 @@ if legend_chips:
     )
     m.get_root().html.add_child(folium.Element(bottom_bar_html))
 
+if selected_driver_filter == "Show All Drivers" and excluded_bags:
+    ex_fg = folium.FeatureGroup(name=f"\U0001f6ab Excluded Stops ({len(excluded_bags)})", show=True)
+    for ex_stop in excluded_bags:
+        ex_lat, ex_lon = float(ex_stop["Resolved_Lat"]), float(ex_stop["Resolved_Lon"])
+        route_coords_for_bounds.append((ex_lat, ex_lon))
+        is_om = "OMAN" in ex_stop["Driver_ID"]
+        icon_color = "#e65100" if is_om else "#212121"
+        ex_label = "OUTSIDE UAE (OMAN)" if is_om else f"EXCLUDED ({ex_stop.get('Driver_ID', '')})"
+        warn_html = (
+            f'<div style="background:{icon_color}; color:#fff; border-radius:50%; '
+            f'width:24px; height:24px; text-align:center; font-weight:bold; '
+            f'font-size:11px; line-height:24px; border:2px solid #ff5252;">\u2715</div>'
+        )
+        warn_badge = folium.DivIcon(html=warn_html, icon_size=(24, 24), icon_anchor=(12, 12))
+        folium.Marker(
+            location=[ex_lat, ex_lon],
+            popup=f"<b>\U0001f6ab {ex_label}</b><br>Bag: {ex_stop.get(bag_col, '')}",
+            tooltip=f"\U0001f6ab {ex_label}: {ex_stop.get(bag_col, '')}",
+            icon=warn_badge
+        ).add_to(ex_fg)
+    ex_fg.add_to(m)
+
+if len(route_coords_for_bounds) > 1:
+    all_lats = [c[0] for c in route_coords_for_bounds]
+    all_lons = [c[1] for c in route_coords_for_bounds]
+    m.fit_bounds([[min(all_lats), min(all_lons)], [max(all_lats), max(all_lons)]], padding=(35, 35))
+
+if legend_chips:
+    bottom_bar_html = (
+        '<div style="position:fixed; bottom:10px; left:10px; right:10px; z-index:9999; '
+        'background:rgba(255,255,255,0.94); padding:7px 12px; border-radius:8px; '
+        'box-shadow:0 2px 8px rgba(0,0,0,0.25); font-family:Arial,sans-serif; '
+        'font-size:12px; display:flex; flex-wrap:wrap; align-items:center;">'
+        '<span style="margin-right:14px; font-weight:bold;">\U0001f3e0 Ajman WH</span>'
+        + "".join(legend_chips)
+        + '</div>'
+    )
+    m.get_root().html.add_child(folium.Element(bottom_bar_html))
+
 folium.LayerControl(collapsed=True, position="topright").add_to(m)
-st_folium(m, width="100%", height=750, returned_objects=[])
+
+# Single map render — returns polygon draw events for lasso selection
+st.info("\U0001f58a\ufe0f **Lasso mode:** use the polygon or rectangle tool (top-left of map) to draw a shape around pins, then assign below.")
+map_output = st_folium(m, width="100%", height=800, returned_objects=["last_active_drawing"])
 
 # ==========================================
 # 10. EXPORT & WHATSAPP CARDS
@@ -2037,131 +2094,8 @@ for d_name in active_driver_ids:
 
 
 # ==========================================
-# 10. LASSO / DRAW SELECTOR MAP
+# 10. LASSO ASSIGNMENT PANEL (driven by draw events on the map above)
 # ==========================================
-st.subheader("🖊️ Lasso Select: Draw on Map to Reassign Bags")
-m2 = folium.Map(location=[wh_lat, wh_lon], zoom_start=9, tiles=None, control_scale=True)
-Fullscreen(position="topleft", force_separate_button=True).add_to(m2)
-
-# Enable Rectangle and Polygon drawing tools for lasso selection
-Draw(
-    export=False,
-    position="topleft",
-    draw_options={
-        "polyline": False,
-        "polygon": True,
-        "circle": False,
-        "marker": False,
-        "circlemarker": False,
-        "rectangle": True,
-    },
-    edit_options={"edit": False}
-).add_to(m2)
-
-folium.TileLayer(
-    "https://mt1.google.com/vt/lyrs=m&x={x}&y={y}&z={z}",
-    attr="Google Maps",
-    name="Google Maps (Streets)",
-    overlay=False,
-    control=True
-).add_to(m2)
-
-folium.TileLayer(
-    "https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}",
-    attr="Esri",
-    name="Esri Street Map",
-    overlay=False,
-    control=True
-).add_to(m2)
-
-folium.TileLayer(
-    "https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}",
-    attr="Google Satellite",
-    name="Google Satellite + Roads",
-    overlay=False,
-    control=True
-).add_to(m2)
-
-add_uae_state_grid_to_map_custom(m2, show_by_default=show_state_grid, fill_op=border_opacity)
-
-folium.Marker(
-    location=[wh_lat, wh_lon],
-    popup="<b>Ajman Warehouse (6:30 AM Start)</b>",
-    tooltip="Ajman Warehouse",
-    icon=folium.Icon(color="black", icon="home", prefix="fa")
-).add_to(m2)
-
-lasso_route_bounds = [(wh_lat, wh_lon)]
-lasso_seen_coords = {}
-
-for d_idx, d_name in enumerate(active_driver_ids):
-    if selected_driver_filter != "Show All Drivers" and selected_driver_filter.lower() not in d_name.lower():
-        continue
-
-    color = DRIVER_COLORS[d_idx % len(DRIVER_COLORS)]
-    d_stops = [r for r in master_rows if r["Driver_ID"] == d_name]
-    d_stops.sort(key=lambda x: int(x["Stop_Sequence"]))
-
-    if not d_stops:
-        continue
-
-    total_bags = d_stops[0].get("Route_Total_Bags", len(d_stops))
-    total_km = d_stops[0].get("Route_OneWay_KM", "0")
-
-    fg2 = folium.FeatureGroup(name=f"{d_name} ({total_bags} bags | {total_km} km)", show=True)
-    waypoints2 = [(wh_lat, wh_lon)] + [(float(s["Resolved_Lat"]), float(s["Resolved_Lon"])) for s in d_stops]
-    for pt in waypoints2:
-        lasso_route_bounds.append(pt)
-
-    road_polyline2 = get_osrm_route_geometry(waypoints2)
-    AntPath(locations=road_polyline2, color=color, weight=5, opacity=route_line_opacity, tooltip=d_name).add_to(fg2)
-
-    for s in d_stops:
-        raw_lat, raw_lon = float(s["Resolved_Lat"]), float(s["Resolved_Lon"])
-        coord_key = (round(raw_lat, 5), round(raw_lon, 5))
-        dup_count = lasso_seen_coords.get(coord_key, 0)
-        lasso_seen_coords[coord_key] = dup_count + 1
-        disp_lat = raw_lat + (dup_count * 0.00014)
-        disp_lon = raw_lon + (dup_count * 0.00014)
-
-        phase_str = s.get("Stop_Phase", "Primary City")
-        is_area_fb = s.get("Dispatch_Status") == "ASSIGNED_AREA_FALLBACK_NO_PIN"
-        border_style = "2px dotted #ff1744" if is_area_fb else ("2px dashed #ffeb3b" if phase_str == "Return-Leg Cluster" else "2px solid #fff")
-
-        pin_url = f"https://www.google.com/maps?q={raw_lat},{raw_lon}"
-        badge_html = (
-            f'<div style="background:{color}; color:#fff; border-radius:50%; '
-            f'width:24px; height:24px; text-align:center; font-weight:bold; '
-            f'font-size:11px; line-height:24px; border:{border_style}; '
-            f'box-shadow:0 2px 4px rgba(0,0,0,0.4);">'
-            f'{s["Stop_Sequence"]}</div>'
-        )
-        badge2 = folium.DivIcon(html=badge_html, icon_size=(24, 24), icon_anchor=(12, 12))
-        popup_html = (
-            f'<div style="font-family:Arial,sans-serif; font-size:12px; min-width:200px;">'
-            f'<b>{d_name} — Stop #{s["Stop_Sequence"]}</b><br>'
-            f'<b>Bag:</b> {s.get(bag_col, "")}<br>'
-            f'<b>State/Zone:</b> {s.get("City_Area", "")}<br>'
-            f'<a href="{pin_url}" target="_blank" style="color:#1a73e8; font-weight:bold;">Open Pin ↗</a>'
-            f'</div>'
-        )
-        folium.Marker(
-            location=[disp_lat, disp_lon],
-            popup=folium.Popup(popup_html, max_width=280),
-            tooltip=f"{s.get(bag_col, '')} • Stop #{s['Stop_Sequence']} ({s.get('City_Area', '')})",
-            icon=badge2
-        ).add_to(fg2)
-    fg2.add_to(m2)
-
-if len(lasso_route_bounds) > 1:
-    lats2 = [c[0] for c in lasso_route_bounds]
-    lons2 = [c[1] for c in lasso_route_bounds]
-    m2.fit_bounds([[min(lats2), min(lons2)], [max(lats2), max(lons2)]], padding=(35, 35))
-
-folium.LayerControl(collapsed=True, position="topright").add_to(m2)
-
-# Capture drawn shapes from the lasso map
-map_output = st_folium(m2, width="100%", height=600, returned_objects=["last_active_drawing"])
 
 # ==========================================
 # 10.1 LASSO SELECTION ASSIGNMENT PANEL
