@@ -308,6 +308,14 @@
     window.parent.postMessage(payload, "*");
   }
 
+  function sendComponentValue(value) {
+    window.parent.postMessage({
+      isStreamlitMessage: true,
+      type: "streamlit:setComponentValue",
+      value: value
+    }, "*");
+  }
+
   function reportFrameHeight() {
     sendToStreamlit("streamlit:setFrameHeight", { height: 830 });
   }
@@ -391,7 +399,7 @@
       document.getElementById('lasso-status-text').innerText = "";
     }, 2000);
 
-    sendToStreamlit("streamlit:setComponentValue", {
+    sendComponentValue({
       last_active_drawing: null,
       timestamp: Date.now()
     });
@@ -404,13 +412,13 @@
     if (all && all.features && all.features.length > 0) {
       const activeFeature = all.features[all.features.length - 1];
       document.getElementById('lasso-status-text').innerText = "Shape captured!";
-      sendToStreamlit("streamlit:setComponentValue", {
+      sendComponentValue({
         last_active_drawing: activeFeature,
         timestamp: Date.now()
       });
     } else {
       document.getElementById('lasso-status-text').innerText = "";
-      sendToStreamlit("streamlit:setComponentValue", {
+      sendComponentValue({
         last_active_drawing: null,
         timestamp: Date.now()
       });
@@ -683,8 +691,14 @@
       });
     }
 
-    // 6. Restore active drawn feature if provided
-    if (data.active_drawing && draw) {
+    // 6. Handle explicit clear or restore active drawn feature
+    if (data.clear_drawing && draw) {
+      draw.deleteAll();
+      const drawBtn = document.getElementById('btn-draw-poly');
+      if (drawBtn) drawBtn.classList.remove('active');
+      const stText = document.getElementById('lasso-status-text');
+      if (stText) stText.innerText = "";
+    } else if (data.active_drawing && draw) {
       try {
         const existing = draw.getAll();
         if (!existing || existing.features.length === 0) {

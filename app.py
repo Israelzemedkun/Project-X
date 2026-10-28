@@ -1927,13 +1927,15 @@ if map_engine_choice.startswith("MapLibre"):
         "excluded_stops": ml_excluded,
         "legend_chips": legend_chips_data,
         "active_drawing": st.session_state.get("last_lasso_drawing", None),
+        "clear_drawing": st.session_state.pop("lasso_clear_requested", False),
     }
 
     st.info("⚡ **MapLibre GL Mode (v3.2):** GPU WebGL rendering, 3D pitch/rotation (Right-Click+Drag / Ctrl+Drag). Click **⬡ Draw Shape** on the map to lasso pins, switch base layers with top-right buttons.")
+    map_ver = st.session_state.get("map_version", 0)
     map_output = _maplibre_component(
         map_data=map_data,
-        key="maplibre_dispatch_map",
-        default={"last_active_drawing": None}
+        key=f"maplibre_dispatch_map_{map_ver}",
+        default=None
     )
 else:
     # Legacy Folium Map
@@ -2111,13 +2113,13 @@ def point_in_polygon(lat, lon, poly_coords_lonlat):
             inside = not inside
     return inside
 
-if map_output and isinstance(map_output, dict) and "last_active_drawing" in map_output:
+if map_output and isinstance(map_output, dict):
     if map_output.get("last_active_drawing"):
         st.session_state["last_lasso_drawing"] = map_output.get("last_active_drawing")
-    elif map_output.get("last_active_drawing") is None and "timestamp" in map_output:
+    elif "last_active_drawing" in map_output and map_output.get("last_active_drawing") is None:
         st.session_state["last_lasso_drawing"] = None
 
-_active_drawing = st.session_state.get("last_lasso_drawing", None) or (map_output.get("last_active_drawing") if isinstance(map_output, dict) else None)
+_active_drawing = st.session_state.get("last_lasso_drawing", None)
 if _active_drawing and _active_drawing.get("geometry"):
     _geom_type   = _active_drawing["geometry"]["type"]
     _geom_coords = _active_drawing["geometry"]["coordinates"]
@@ -2146,7 +2148,7 @@ if _active_drawing and _active_drawing.get("geometry"):
                 [
                     {
                         "Bag": r.get(bag_col, ""),
-                        "Current Driver": r.get("Assigned_Driver", "UNASSIGNED"),
+                        "Current Driver": r.get("Assigned_Driver") or r.get("Driver_ID", "UNASSIGNED"),
                         "Area": r.get("City_Area", ""),
                         "Stop #": r.get("Stop_Sequence", "-"),
                     }
@@ -2156,30 +2158,42 @@ if _active_drawing and _active_drawing.get("geometry"):
                 hide_index=True,
             )
 
-            _la_col1, _la_col2 = st.columns([3, 1])
-            # All fleet drivers available — not just the ones with active routes
-            _lasso_driver = _la_col1.selectbox(
-                "Assign selected pins to driver:",
-                options=FLEET_DRIVERS,
-                key="lasso_drv_target"
-            )
-            if _la_col2.button("⚡ Assign & Re-Sequence", type="primary", use_container_width=True):
+            _la_col1, _la_col2, _la_col3 = st.columns([3, 2, 1])
+            with _la_col1:
+                _lasso_driver = st.selectbox(
+                    "Assign selected pins to driver:",
+                    options=FLEET_DRIVERS,
+                    key="lasso_drv_target"
+                )
+            with _la_col2:
+                st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
+                assign_btn = st.button("⚡ Assign & Re-Sequence", type="primary", use_container_width=True)
+            with _la_col3:
+                st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
+                clear_btn = st.button("❌ Clear Shape", use_container_width=True)
+
+            if clear_btn:
+                st.session_state["last_lasso_drawing"] = None
+                st.session_state["lasso_clear_requested"] = True
+                st.session_state["map_version"] = st.session_state.get("map_version", 0) + 1
+                st.rerun()
+
+            if assign_btn:
                 # ██ SNAPSHOT old driver names BEFORE we modify any rows.
-                # _lasso_hits holds references into master_rows, so once we
-                # overwrite Assigned_Driver below, the old value is gone.
                 _old_drivers = {
-                    _hit.get("Assigned_Driver")
+                    _hit.get("Assigned_Driver") or _hit.get("Driver_ID", "").split(" (")[0]
                     for _hit in _lasso_hits
-                    if _hit.get("Assigned_Driver") and "NOT GOING" not in (_hit.get("Assigned_Driver") or "")
+                    if (_hit.get("Assigned_Driver") or _hit.get("Driver_ID"))
+                    and "NOT GOING" not in (_hit.get("Assigned_Driver") or "")
+                    and "NOT GOING" not in (_hit.get("Driver_ID") or "")
                 }
 
                 # Determine the Driver_ID to stamp on new rows.
-                # Use the existing Driver_ID for _lasso_driver if they already
-                # have stops (preserves corridor label); otherwise plain name.
+                # Use the existing Driver_ID for _lasso_driver if they already have stops (preserves corridor label); otherwise plain name.
                 _existing_for_new = [
                     r for r in master_rows
-                    if r.get("Assigned_Driver") == _lasso_driver
-                    and r.get("Bag_Number") not in {h.get("Bag_Number") for h in _lasso_hits}
+                    if (r.get("Assigned_Driver") == _lasso_driver or r.get("Driver_ID", "").split(" (")[0] == _lasso_driver)
+                    and " (" in r.get("Driver_ID", "")
                 ]
                 _new_did = _existing_for_new[0]["Driver_ID"] if _existing_for_new else _lasso_driver
 
@@ -2199,7 +2213,7 @@ if _active_drawing and _active_drawing.get("geometry"):
                         continue
                     _di = [
                         i for i, r in enumerate(master_rows)
-                        if r.get("Assigned_Driver") == _drv and r.get("Resolved_Lat")
+                        if (r.get("Assigned_Driver") == _drv or r.get("Driver_ID", "").split(" (")[0] == _drv) and r.get("Resolved_Lat")
                     ]
                     _dr = [master_rows[i] for i in _di]
                     if _dr:
@@ -2212,6 +2226,8 @@ if _active_drawing and _active_drawing.get("geometry"):
 
                 st.session_state["dispatch_data"] = master_rows
                 st.session_state["last_lasso_drawing"] = None
+                st.session_state["lasso_clear_requested"] = True
+                st.session_state["map_version"] = st.session_state.get("map_version", 0) + 1
                 st.success(f"✅ {len(_lasso_hits)} bag(s) assigned to **{_lasso_driver}** and routes re-sequenced.")
                 st.rerun()
         else:
