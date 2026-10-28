@@ -13,13 +13,18 @@ import folium
 from folium.plugins import AntPath, Draw, Fullscreen
 import requests
 import streamlit as st
+import streamlit.components.v1 as components
 from streamlit_folium import st_folium
 
+# Declare custom MapLibre GL JS component
+_MAPLIBRE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__ if "__file__" in locals() else "app.py")), "maplibre_component")
+_maplibre_component = components.declare_component("maplibre_map", path=_MAPLIBRE_DIR)
+
 # ==========================================
-# PAGE CONFIGURATION (VERSION 3.1)
+# PAGE CONFIGURATION (VERSION 3.2 - MAPLIBRE EXPERIMENT)
 # ==========================================
 st.set_page_config(
-    page_title="Lion Delivery Dispatch v3.1",
+    page_title="Lion Delivery Dispatch v3.2 (MapLibre)",
     page_icon="🚚",
     layout="wide"
 )
@@ -1348,7 +1353,14 @@ def fetch_uae_real_borders_geojson():
 db_stats = get_recent_driver_stats()
 default_far_yesterday = [d for d, st_info in db_stats.items() if st_info["went_far_yesterday"]]
 
-st.sidebar.title("🧪 V3 LAB — Dispatch & Real Borders")
+st.sidebar.title("🧪 V3.2 LAB — MapLibre Dispatch")
+
+map_engine_choice = st.sidebar.radio(
+    "🗺️ Map Rendering Engine",
+    options=["MapLibre GL JS (Hardware-Accelerated 3D)", "Folium / Leaflet (Legacy 2D)"],
+    index=0,
+    help="MapLibre uses GPU WebGL rendering, 3D tilt/rotation, and vector styling."
+)
 
 selected_driver_filter = st.sidebar.selectbox(
     "🔍 View Driver on Map",
@@ -1799,104 +1811,15 @@ with ctrl_tab2:
             st.rerun()
 
 # ==========================================
-# 9. UNIFIED MAP — ROUTES + POLYGON DRAW SELECTOR
+# 9. UNIFIED MAP — ROUTES + POLYGON DRAW SELECTOR (MAPLIBRE GL JS / FOLIUM)
 # ==========================================
-m = folium.Map(location=[wh_lat, wh_lon], zoom_start=9, tiles=None, control_scale=True)
-Fullscreen(position="topleft", force_separate_button=True).add_to(m)
-
-# Polygon & rectangle draw tool for lasso bag selection
-Draw(
-    export=False,
-    position="topleft",
-    draw_options={
-        "polyline": False,
-        "polygon": True,
-        "circle": False,
-        "marker": False,
-        "circlemarker": False,
-        "rectangle": True,
-    },
-    edit_options={"edit": False}
-).add_to(m)
-
-folium.TileLayer(
-    "https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}",
-    attr="Esri",
-    name="Esri Street Map",
-    overlay=False,
-    control=True
-).add_to(m)
-
-folium.TileLayer(
-    "https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}",
-    attr="Google Satellite",
-    name="Google Satellite + Roads",
-    overlay=False,
-    control=True
-).add_to(m)
-
-# Google Streets is added LAST so Leaflet renders it on top by default
-folium.TileLayer(
-    "https://mt1.google.com/vt/lyrs=m&x={x}&y={y}&z={z}",
-    attr="Google Maps",
-    name="Google Maps (Streets)",
-    overlay=False,
-    control=True
-).add_to(m)
-
-# Pass the sidebar slider opacity into the GeoJSON border renderer
-def add_uae_state_grid_to_map_custom(m, show_by_default=True, fill_op=0.06):
-    if not show_by_default:
-        return
-    grid_fg = folium.FeatureGroup(name="🗺️ UAE Emirate Borders (Real GeoJSON)", show=True)
-    borders = fetch_uae_real_borders_geojson()
-
-    for item in borders:
-        state_color = item["color"]
-        feature = {
-            "type": "Feature",
-            "properties": {"name": item["name"], "color": state_color},
-            "geometry": item["geojson"]
-        }
-        folium.GeoJson(
-            feature,
-            style_function=lambda feat, c=state_color, op=fill_op: {
-                "color": c,
-                "weight": 2.5,
-                "opacity": 0.9,
-                "dashArray": "6, 4",
-                "fillColor": c,
-                "fillOpacity": op,
-            },
-            interactive=False
-        ).add_to(grid_fg)
-
-        label_html = (
-            f'<div style="display:inline-block; background:rgba(255,255,255,0.88); '
-            f'color:{state_color}; border:1.5px solid {state_color}; border-radius:4px; '
-            f'padding:2px 6px; font-family:Arial,sans-serif; font-size:10px; '
-            f'font-weight:800; white-space:nowrap; pointer-events:none; '
-            f'box-shadow:0 1px 3px rgba(0,0,0,0.25);">'
-            f'{item["name"]}</div>'
-        )
-        folium.Marker(
-            location=item["label_pos"],
-            icon=folium.DivIcon(html=label_html, icon_size=(130, 22), icon_anchor=(65, 11))
-        ).add_to(grid_fg)
-    grid_fg.add_to(m)
-
-add_uae_state_grid_to_map_custom(m, show_by_default=show_state_grid, fill_op=border_opacity)
-
-folium.Marker(
-    location=[wh_lat, wh_lon],
-    popup="<b>Ajman Warehouse (6:30 AM Start)</b>",
-    tooltip="Ajman Warehouse",
-    icon=folium.Icon(color="black", icon="home", prefix="fa")
-).add_to(m)
-
 route_coords_for_bounds = [(wh_lat, wh_lon)]
 legend_chips = []
+legend_chips_data = []
 seen_marker_coords = {}
+ml_routes = []
+ml_stops = []
+ml_excluded = []
 
 for d_idx, d_name in enumerate(active_driver_ids):
     if selected_driver_filter != "Show All Drivers" and selected_driver_filter.lower() not in d_name.lower():
@@ -1914,15 +1837,18 @@ for d_idx, d_name in enumerate(active_driver_ids):
     nav_links = build_google_maps_nav_links(wh_lat, wh_lon, d_stops)
     primary_nav_url = nav_links[0][1] if nav_links else "#"
 
-    fg = folium.FeatureGroup(name=f"{d_name} ({total_bags} bags | {total_km} km)", show=True)
-
     waypoints = [(wh_lat, wh_lon)] + [(float(s["Resolved_Lat"]), float(s["Resolved_Lon"])) for s in d_stops]
     for pt in waypoints:
         route_coords_for_bounds.append(pt)
 
     road_polyline = get_osrm_route_geometry(waypoints)
-    # Uses the sidebar slider opacity for route lines
-    AntPath(locations=road_polyline, color=color, weight=5, opacity=route_line_opacity, tooltip=d_name).add_to(fg)
+    ml_routes.append({
+        "driver_name": d_name,
+        "color": color,
+        "total_bags": total_bags,
+        "total_km": total_km,
+        "coordinates": [[pt[1], pt[0]] for pt in road_polyline]
+    })
 
     for s in d_stops:
         raw_lat, raw_lon = float(s["Resolved_Lat"]), float(s["Resolved_Lon"])
@@ -1938,30 +1864,27 @@ for d_idx, d_name in enumerate(active_driver_ids):
         border_style = "2px dotted #ff1744" if is_area_fb else ("2px dashed #ffeb3b" if phase_str == "Return-Leg Cluster" else "2px solid #fff")
 
         pin_url = f"https://www.google.com/maps?q={raw_lat},{raw_lon}"
-        badge_html = (
-            f'<div style="background:{color}; color:#fff; border-radius:50%; '
-            f'width:24px; height:24px; text-align:center; font-weight:bold; '
-            f'font-size:11px; line-height:24px; border:{border_style}; '
-            f'box-shadow:0 2px 4px rgba(0,0,0,0.4);">'
-            f'{s["Stop_Sequence"]}</div>'
-        )
-        badge = folium.DivIcon(html=badge_html, icon_size=(24, 24), icon_anchor=(12, 12))
-        popup_html = (
-            f'<div style="font-family:Arial,sans-serif; font-size:12px; min-width:200px;">'
-            f'<b>{d_name} — Stop #{s["Stop_Sequence"]}</b><br>'
-            f'<b>Bag:</b> {s.get(bag_col, "")}<br>'
-            f'<b>State/Zone:</b> {s.get("City_Area", "")}<br>'
-            f'<a href="{pin_url}" target="_blank" style="color:#1a73e8; font-weight:bold;">Open Pin ↗</a>'
-            f'</div>'
-        )
-        folium.Marker(
-            location=[disp_lat, disp_lon],
-            popup=folium.Popup(popup_html, max_width=280),
-            tooltip=f"{s.get(bag_col, '')} • Stop #{s['Stop_Sequence']} ({s.get('City_Area', '')})",
-            icon=badge
-        ).add_to(fg)
+        ml_stops.append({
+            "raw_lat": raw_lat,
+            "raw_lon": raw_lon,
+            "disp_lat": disp_lat,
+            "disp_lon": disp_lon,
+            "sequence": str(s.get("Stop_Sequence", "")),
+            "bag": str(s.get(bag_col, "")),
+            "area": str(s.get("City_Area", "")),
+            "driver_name": d_name,
+            "color": color,
+            "border_style": border_style,
+            "pin_url": pin_url,
+        })
 
-    fg.add_to(m)
+    legend_chips_data.append({
+        "driver_name": d_name,
+        "color": color,
+        "total_bags": total_bags,
+        "total_km": total_km,
+        "nav_url": primary_nav_url,
+    })
 
     legend_chips.append(
         f'<span style="display:inline-flex; align-items:center; margin-right:14px; margin-bottom:4px; white-space:nowrap;">'
@@ -1971,67 +1894,207 @@ for d_idx, d_name in enumerate(active_driver_ids):
         f'</span>'
     )
 
-if len(route_coords_for_bounds) > 1:
-    lats = [c[0] for c in route_coords_for_bounds]
-    lons = [c[1] for c in route_coords_for_bounds]
-    m.fit_bounds([[min(lats), min(lons)], [max(lats), max(lons)]], padding=(35, 35))
-
-if legend_chips:
-    bottom_bar_html = (
-        '<div style="position:fixed; bottom:10px; left:10px; right:10px; z-index:9999; '
-        'background:rgba(255,255,255,0.94); padding:7px 12px; border-radius:8px; '
-        'box-shadow:0 2px 8px rgba(0,0,0,0.25); font-family:Arial,sans-serif; '
-        'font-size:12px; display:flex; flex-wrap:wrap; align-items:center;">'
-        '<span style="margin-right:14px; font-weight:bold;">🏠 Ajman WH</span>'
-        + "".join(legend_chips) +
-        '</div>'
-    )
-    m.get_root().html.add_child(folium.Element(bottom_bar_html))
-
 if selected_driver_filter == "Show All Drivers" and excluded_bags:
-    ex_fg = folium.FeatureGroup(name=f"\U0001f6ab Excluded Stops ({len(excluded_bags)})", show=True)
     for ex_stop in excluded_bags:
         ex_lat, ex_lon = float(ex_stop["Resolved_Lat"]), float(ex_stop["Resolved_Lon"])
         route_coords_for_bounds.append((ex_lat, ex_lon))
         is_om = "OMAN" in ex_stop["Driver_ID"]
         icon_color = "#e65100" if is_om else "#212121"
         ex_label = "OUTSIDE UAE (OMAN)" if is_om else f"EXCLUDED ({ex_stop.get('Driver_ID', '')})"
-        warn_html = (
-            f'<div style="background:{icon_color}; color:#fff; border-radius:50%; '
-            f'width:24px; height:24px; text-align:center; font-weight:bold; '
-            f'font-size:11px; line-height:24px; border:2px solid #ff5252;">\u2715</div>'
-        )
-        warn_badge = folium.DivIcon(html=warn_html, icon_size=(24, 24), icon_anchor=(12, 12))
-        folium.Marker(
-            location=[ex_lat, ex_lon],
-            popup=f"<b>\U0001f6ab {ex_label}</b><br>Bag: {ex_stop.get(bag_col, '')}",
-            tooltip=f"\U0001f6ab {ex_label}: {ex_stop.get(bag_col, '')}",
-            icon=warn_badge
-        ).add_to(ex_fg)
-    ex_fg.add_to(m)
+        ml_excluded.append({
+            "lat": ex_lat,
+            "lon": ex_lon,
+            "bag": str(ex_stop.get(bag_col, "")),
+            "label": ex_label,
+            "icon_color": icon_color,
+        })
 
-if len(route_coords_for_bounds) > 1:
-    all_lats = [c[0] for c in route_coords_for_bounds]
-    all_lons = [c[1] for c in route_coords_for_bounds]
-    m.fit_bounds([[min(all_lats), min(all_lons)], [max(all_lats), max(all_lons)]], padding=(35, 35))
+# Render selected engine
+if map_engine_choice.startswith("MapLibre"):
+    map_data = {
+        "warehouse": {
+            "lat": wh_lat,
+            "lon": wh_lon,
+            "name": "Ajman Warehouse (6:30 AM Start)"
+        },
+        "borders": fetch_uae_real_borders_geojson() if show_state_grid else [],
+        "show_borders": show_state_grid,
+        "border_opacity": border_opacity,
+        "route_line_opacity": route_line_opacity,
+        "driver_filter": selected_driver_filter,
+        "routes": ml_routes,
+        "stops": ml_stops,
+        "excluded_stops": ml_excluded,
+        "legend_chips": legend_chips_data,
+        "active_drawing": st.session_state.get("last_lasso_drawing", None),
+    }
 
-if legend_chips:
-    bottom_bar_html = (
-        '<div style="position:fixed; bottom:10px; left:10px; right:10px; z-index:9999; '
-        'background:rgba(255,255,255,0.94); padding:7px 12px; border-radius:8px; '
-        'box-shadow:0 2px 8px rgba(0,0,0,0.25); font-family:Arial,sans-serif; '
-        'font-size:12px; display:flex; flex-wrap:wrap; align-items:center;">'
-        '<span style="margin-right:14px; font-weight:bold;">\U0001f3e0 Ajman WH</span>'
-        + "".join(legend_chips)
-        + '</div>'
+    st.info("⚡ **MapLibre GL Mode (v3.2):** GPU WebGL rendering, 3D pitch/rotation (Right-Click+Drag / Ctrl+Drag). Click **⬡ Draw Shape** on the map to lasso pins, switch base layers with top-right buttons.")
+    map_output = _maplibre_component(
+        map_data=map_data,
+        key="maplibre_dispatch_map",
+        default={"last_active_drawing": None}
     )
-    m.get_root().html.add_child(folium.Element(bottom_bar_html))
+else:
+    # Legacy Folium Map
+    m = folium.Map(location=[wh_lat, wh_lon], zoom_start=9, tiles=None, control_scale=True)
+    Fullscreen(position="topleft", force_separate_button=True).add_to(m)
 
-folium.LayerControl(collapsed=True, position="topright").add_to(m)
+    Draw(
+        export=False,
+        position="topleft",
+        draw_options={
+            "polyline": False,
+            "polygon": True,
+            "circle": False,
+            "marker": False,
+            "circlemarker": False,
+            "rectangle": True,
+        },
+        edit_options={"edit": False}
+    ).add_to(m)
 
-# Single map render — returns polygon draw events for lasso selection
-st.info("✏️ **Lasso mode:** use the polygon or rectangle tool (top-left of map) to draw a shape around any pins, then assign them to any driver below.")
-map_output = st_folium(m, width="100%", height=800, returned_objects=["last_active_drawing"])
+    folium.TileLayer(
+        "https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}",
+        attr="Esri",
+        name="Esri Street Map",
+        overlay=False,
+        control=True
+    ).add_to(m)
+
+    folium.TileLayer(
+        "https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}",
+        attr="Google Satellite",
+        name="Google Satellite + Roads",
+        overlay=False,
+        control=True
+    ).add_to(m)
+
+    folium.TileLayer(
+        "https://mt1.google.com/vt/lyrs=m&x={x}&y={y}&z={z}",
+        attr="Google Maps",
+        name="Google Maps (Streets)",
+        overlay=False,
+        control=True
+    ).add_to(m)
+
+    if show_state_grid:
+        grid_fg = folium.FeatureGroup(name="🗺️ UAE Emirate Borders (Real GeoJSON)", show=True)
+        borders = fetch_uae_real_borders_geojson()
+        for item in borders:
+            state_color = item["color"]
+            feature = {
+                "type": "Feature",
+                "properties": {"name": item["name"], "color": state_color},
+                "geometry": item["geojson"]
+            }
+            folium.GeoJson(
+                feature,
+                style_function=lambda feat, c=state_color, op=border_opacity: {
+                    "color": c,
+                    "weight": 2.5,
+                    "opacity": 0.9,
+                    "dashArray": "6, 4",
+                    "fillColor": c,
+                    "fillOpacity": op,
+                },
+                interactive=False
+            ).add_to(grid_fg)
+
+            label_html = (
+                f'<div style="display:inline-block; background:rgba(255,255,255,0.88); '
+                f'color:{state_color}; border:1.5px solid {state_color}; border-radius:4px; '
+                f'padding:2px 6px; font-family:Arial,sans-serif; font-size:10px; '
+                f'font-weight:800; white-space:nowrap; pointer-events:none; '
+                f'box-shadow:0 1px 3px rgba(0,0,0,0.25);">'
+                f'{item["name"]}</div>'
+            )
+            folium.Marker(
+                location=item["label_pos"],
+                icon=folium.DivIcon(html=label_html, icon_size=(130, 22), icon_anchor=(65, 11))
+            ).add_to(grid_fg)
+        grid_fg.add_to(m)
+
+    folium.Marker(
+        location=[wh_lat, wh_lon],
+        popup="<b>Ajman Warehouse (6:30 AM Start)</b>",
+        tooltip="Ajman Warehouse",
+        icon=folium.Icon(color="black", icon="home", prefix="fa")
+    ).add_to(m)
+
+    for r_entry in ml_routes:
+        d_name = r_entry["driver_name"]
+        color = r_entry["color"]
+        total_bags = r_entry["total_bags"]
+        total_km = r_entry["total_km"]
+        fg = folium.FeatureGroup(name=f"{d_name} ({total_bags} bags | {total_km} km)", show=True)
+        folium_polyline = [[pt[1], pt[0]] for pt in r_entry["coordinates"]]
+        AntPath(locations=folium_polyline, color=color, weight=5, opacity=route_line_opacity, tooltip=d_name).add_to(fg)
+
+        for s in ml_stops:
+            if s["driver_name"] != d_name:
+                continue
+            badge_html = (
+                f'<div style="background:{s["color"]}; color:#fff; border-radius:50%; '
+                f'width:24px; height:24px; text-align:center; font-weight:bold; '
+                f'font-size:11px; line-height:24px; border:{s["border_style"]}; '
+                f'box-shadow:0 2px 4px rgba(0,0,0,0.4);">'
+                f'{s["sequence"]}</div>'
+            )
+            badge = folium.DivIcon(html=badge_html, icon_size=(24, 24), icon_anchor=(12, 12))
+            popup_html = (
+                f'<div style="font-family:Arial,sans-serif; font-size:12px; min-width:200px;">'
+                f'<b>{d_name} — Stop #{s["sequence"]}</b><br>'
+                f'<b>Bag:</b> {s["bag"]}<br>'
+                f'<b>State/Zone:</b> {s["area"]}<br>'
+                f'<a href="{s["pin_url"]}" target="_blank" style="color:#1a73e8; font-weight:bold;">Open Pin ↗</a>'
+                f'</div>'
+            )
+            folium.Marker(
+                location=[s["disp_lat"], s["disp_lon"]],
+                popup=folium.Popup(popup_html, max_width=280),
+                tooltip=f"{s['bag']} • Stop #{s['sequence']} ({s['area']})",
+                icon=badge
+            ).add_to(fg)
+        fg.add_to(m)
+
+    if selected_driver_filter == "Show All Drivers" and ml_excluded:
+        ex_fg = folium.FeatureGroup(name=f"🚫 Excluded Stops ({len(ml_excluded)})", show=True)
+        for ex_stop in ml_excluded:
+            warn_html = (
+                f'<div style="background:{ex_stop["icon_color"]}; color:#fff; border-radius:50%; '
+                f'width:24px; height:24px; text-align:center; font-weight:bold; '
+                f'font-size:11px; line-height:24px; border:2px solid #ff5252;">✕</div>'
+            )
+            warn_badge = folium.DivIcon(html=warn_html, icon_size=(24, 24), icon_anchor=(12, 12))
+            folium.Marker(
+                location=[ex_stop["lat"], ex_stop["lon"]],
+                popup=f"<b>🚫 {ex_stop['label']}</b><br>Bag: {ex_stop['bag']}",
+                tooltip=f"🚫 {ex_stop['label']}: {ex_stop['bag']}",
+                icon=warn_badge
+            ).add_to(ex_fg)
+        ex_fg.add_to(m)
+
+    if len(route_coords_for_bounds) > 1:
+        all_lats = [c[0] for c in route_coords_for_bounds]
+        all_lons = [c[1] for c in route_coords_for_bounds]
+        m.fit_bounds([[min(all_lats), min(all_lons)], [max(all_lats), max(all_lons)]], padding=(35, 35))
+
+    if legend_chips:
+        bottom_bar_html = (
+            '<div style="position:fixed; bottom:10px; left:10px; right:10px; z-index:9999; '
+            'background:rgba(255,255,255,0.94); padding:7px 12px; border-radius:8px; '
+            'box-shadow:0 2px 8px rgba(0,0,0,0.25); font-family:Arial,sans-serif; '
+            'font-size:12px; display:flex; flex-wrap:wrap; align-items:center;">'
+            '<span style="margin-right:14px; font-weight:bold;">🏠 Ajman WH</span>'
+            + "".join(legend_chips)
+            + '</div>'
+        )
+        m.get_root().html.add_child(folium.Element(bottom_bar_html))
+
+    folium.LayerControl(collapsed=True, position="topright").add_to(m)
+    st.info("✏️ **Folium Legacy Mode:** Use polygon or rectangle draw tool (top-left) to lasso pins.")
+    map_output = st_folium(m, width="100%", height=800, returned_objects=["last_active_drawing"])
 
 # ==========================================
 # 9.1 LASSO ASSIGNMENT PANEL — directly below the map
@@ -2048,7 +2111,13 @@ def point_in_polygon(lat, lon, poly_coords_lonlat):
             inside = not inside
     return inside
 
-_active_drawing = map_output.get("last_active_drawing") if map_output else None
+if map_output and isinstance(map_output, dict) and "last_active_drawing" in map_output:
+    if map_output.get("last_active_drawing"):
+        st.session_state["last_lasso_drawing"] = map_output.get("last_active_drawing")
+    elif map_output.get("last_active_drawing") is None and "timestamp" in map_output:
+        st.session_state["last_lasso_drawing"] = None
+
+_active_drawing = st.session_state.get("last_lasso_drawing", None) or (map_output.get("last_active_drawing") if isinstance(map_output, dict) else None)
 if _active_drawing and _active_drawing.get("geometry"):
     _geom_type   = _active_drawing["geometry"]["type"]
     _geom_coords = _active_drawing["geometry"]["coordinates"]
@@ -2142,6 +2211,7 @@ if _active_drawing and _active_drawing.get("geometry"):
                         pass
 
                 st.session_state["dispatch_data"] = master_rows
+                st.session_state["last_lasso_drawing"] = None
                 st.success(f"✅ {len(_lasso_hits)} bag(s) assigned to **{_lasso_driver}** and routes re-sequenced.")
                 st.rerun()
         else:
