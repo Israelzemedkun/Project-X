@@ -17,23 +17,26 @@
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" />
 
   <style>
+    @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@500;600;700;800&family=JetBrains+Mono:wght@500;700&display=swap');
+
     html, body {
       margin: 0;
       padding: 0;
       width: 100%;
       height: 100%;
       overflow: hidden;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: transparent;
     }
 
     #map-container {
       position: relative;
       width: 100%;
-      height: 800px;
-      border-radius: 12px;
+      height: 820px;
+      border-radius: 16px;
       overflow: hidden;
-      box-shadow: 0 4px 14px rgba(0,0,0,0.12);
-      border: 1px solid #e0e0e0;
+      box-shadow: 0 10px 30px -5px rgba(15, 23, 42, 0.15), 0 0 0 1px rgba(15, 23, 42, 0.08);
+      background: #f8fafc;
     }
 
     #map {
@@ -41,133 +44,168 @@
       height: 100%;
     }
 
-    /* Base Layer Switcher */
+    /* Base Layer Switcher (Glassmorphic Top-Right Pill) */
     .layer-switcher {
       position: absolute;
-      top: 12px;
-      right: 50px;
+      top: 14px;
+      right: 56px;
       z-index: 10;
-      background: rgba(255, 255, 255, 0.94);
-      backdrop-filter: blur(4px);
+      background: rgba(255, 255, 255, 0.92);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
       padding: 4px;
-      border-radius: 8px;
-      box-shadow: 0 2px 8px rgba(0,0,0,0.18);
+      border-radius: 30px;
+      box-shadow: 0 4px 16px rgba(15, 23, 42, 0.12), 0 0 0 1px rgba(0, 0, 0, 0.06);
       display: flex;
-      gap: 4px;
+      gap: 3px;
     }
 
     .layer-btn {
       border: none;
       background: transparent;
-      padding: 6px 12px;
-      border-radius: 6px;
-      font-size: 11px;
-      font-weight: 600;
-      color: #555;
+      padding: 6px 14px;
+      border-radius: 20px;
+      font-size: 11.5px;
+      font-weight: 700;
+      color: #475569;
       cursor: pointer;
-      transition: all 0.15s ease;
+      transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
       white-space: nowrap;
+      display: flex;
+      align-items: center;
+      gap: 5px;
     }
 
     .layer-btn:hover {
-      background: #f0f0f0;
-      color: #111;
+      background: #f1f5f9;
+      color: #0f172a;
     }
 
     .layer-btn.active {
-      background: #1976d2;
-      color: #fff;
-      box-shadow: 0 1px 3px rgba(25,118,210,0.3);
+      background: #0f172a;
+      color: #ffffff;
+      box-shadow: 0 2px 6px rgba(15, 23, 42, 0.25);
     }
 
-    /* Lasso Toolbar Helper */
+    /* Lasso Toolbar Helper (Glassmorphic Top-Left Pill) */
     .lasso-helper-bar {
       position: absolute;
-      top: 12px;
-      left: 50px;
+      top: 14px;
+      left: 56px;
       z-index: 10;
-      background: rgba(255, 255, 255, 0.94);
-      backdrop-filter: blur(4px);
-      padding: 4px 8px;
-      border-radius: 8px;
-      box-shadow: 0 2px 8px rgba(0,0,0,0.18);
+      background: rgba(255, 255, 255, 0.92);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      padding: 4px 10px;
+      border-radius: 30px;
+      box-shadow: 0 4px 16px rgba(15, 23, 42, 0.12), 0 0 0 1px rgba(0, 0, 0, 0.06);
       display: flex;
       align-items: center;
       gap: 6px;
-      font-size: 11px;
-      font-weight: 600;
-      color: #333;
+      font-size: 11.5px;
+      font-weight: 700;
+      color: #1e293b;
+    }
+
+    .lasso-title-tag {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      color: #0f172a;
+      font-size: 11.5px;
+      font-weight: 800;
+      padding-right: 4px;
+      border-right: 1px solid #e2e8f0;
     }
 
     .lasso-helper-btn {
-      border: 1px solid #ccc;
-      background: #fff;
-      border-radius: 6px;
-      padding: 4px 8px;
-      font-size: 11px;
+      border: 1px solid #cbd5e1;
+      background: #ffffff;
+      border-radius: 20px;
+      padding: 5px 12px;
+      font-size: 11.5px;
+      font-weight: 700;
+      color: #334155;
       cursor: pointer;
       display: flex;
       align-items: center;
-      gap: 4px;
-      transition: all 0.15s;
+      gap: 5px;
+      transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
     }
 
     .lasso-helper-btn:hover {
-      background: #f5f5f5;
-      border-color: #999;
+      background: #f8fafc;
+      border-color: #94a3b8;
+      color: #0f172a;
+      transform: translateY(-1px);
     }
 
     .lasso-helper-btn.active {
-      background: #ff9800;
-      color: #fff;
-      border-color: #f57c00;
+      background: #ea580c;
+      color: #ffffff;
+      border-color: #c2410c;
+      box-shadow: 0 2px 8px rgba(234, 88, 12, 0.35);
+      animation: pulse-border 1.5s infinite;
+    }
+
+    @keyframes pulse-border {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(234, 88, 12, 0.4); }
+      50% { box-shadow: 0 0 0 6px rgba(234, 88, 12, 0); }
     }
 
     .lasso-helper-btn.clear:hover {
-      background: #ffebee;
-      color: #d32f2f;
-      border-color: #ef9a9a;
+      background: #fef2f2;
+      color: #dc2626;
+      border-color: #fca5a5;
+    }
+
+    .lasso-hint-badge {
+      font-size: 11px;
+      color: #64748b;
+      font-weight: 600;
+      padding-left: 2px;
     }
 
     /* Warehouse Marker */
     .wh-marker {
-      width: 32px;
-      height: 32px;
-      background: #111;
+      width: 34px;
+      height: 34px;
+      background: #0f172a;
       border-radius: 50%;
-      border: 2.5px solid #fff;
-      box-shadow: 0 2px 6px rgba(0,0,0,0.45);
+      border: 2.5px solid #f59e0b;
+      box-shadow: 0 4px 12px rgba(15, 23, 42, 0.4), 0 0 0 3px rgba(245, 158, 11, 0.25);
       display: flex;
       align-items: center;
       justify-content: center;
-      color: #fff;
-      font-size: 14px;
+      color: #fef3c7;
+      font-size: 15px;
       cursor: pointer;
-      transition: transform 0.15s;
+      transition: all 0.2s ease;
     }
     .wh-marker:hover {
-      transform: scale(1.15);
+      transform: scale(1.18);
+      box-shadow: 0 6px 16px rgba(15, 23, 42, 0.5), 0 0 0 4px rgba(245, 158, 11, 0.4);
     }
 
     /* Stop Pin Badges */
     .stop-badge {
-      width: 24px;
-      height: 24px;
+      width: 26px;
+      height: 26px;
       border-radius: 50%;
       text-align: center;
-      font-weight: 700;
-      font-size: 11px;
-      line-height: 24px;
+      font-weight: 800;
+      font-size: 11.5px;
+      line-height: 26px;
       color: #ffffff;
-      box-shadow: 0 2px 5px rgba(0,0,0,0.38);
+      box-shadow: 0 3px 8px rgba(15, 23, 42, 0.38), 0 0 0 1px rgba(0,0,0,0.1);
       cursor: pointer;
-      transition: transform 0.15s, box-shadow 0.15s;
+      transition: all 0.18s cubic-bezier(0.4, 0, 0.2, 1);
       user-select: none;
     }
     .stop-badge:hover {
-      transform: scale(1.22);
-      box-shadow: 0 4px 10px rgba(0,0,0,0.5);
-      z-index: 999 !important;
+      transform: translateY(-2px) scale(1.22);
+      box-shadow: 0 6px 16px rgba(15, 23, 42, 0.45), 0 0 0 3px rgba(255,255,255,0.8);
+      z-index: 9999 !important;
     }
 
     /* Excluded Pin Badges */
@@ -179,11 +217,12 @@
       font-weight: 800;
       font-size: 11px;
       line-height: 24px;
-      color: #fff;
-      border: 2px solid #ff5252;
-      box-shadow: 0 2px 5px rgba(0,0,0,0.4);
+      color: #ffffff;
+      border: 2px solid #ef4444;
+      box-shadow: 0 3px 8px rgba(239, 68, 68, 0.35);
       cursor: pointer;
       user-select: none;
+      transition: all 0.18s ease;
     }
     .ex-badge:hover {
       transform: scale(1.2);
@@ -192,79 +231,130 @@
     /* Emirate Border Labels */
     .emirate-label {
       display: inline-block;
-      background: rgba(255, 255, 255, 0.9);
-      border-radius: 4px;
-      padding: 2px 7px;
-      font-family: Arial, sans-serif;
+      background: rgba(255, 255, 255, 0.94);
+      backdrop-filter: blur(4px);
+      border-radius: 6px;
+      padding: 3px 8px;
+      font-family: 'Plus Jakarta Sans', sans-serif;
       font-size: 10px;
       font-weight: 800;
+      letter-spacing: 0.3px;
       white-space: nowrap;
       pointer-events: none;
-      box-shadow: 0 1px 3px rgba(0,0,0,0.25);
+      box-shadow: 0 2px 6px rgba(15, 23, 42, 0.18);
       border-width: 1.5px;
       border-style: solid;
+      text-transform: uppercase;
     }
 
-    /* Popup Styling */
+    /* Card-like Popup Styling */
     .maplibregl-popup-content {
-      border-radius: 10px;
-      padding: 10px 14px;
-      box-shadow: 0 4px 16px rgba(0,0,0,0.25);
-      font-family: Arial, sans-serif;
-      font-size: 12px;
-      color: #222;
-      line-height: 1.45;
+      border-radius: 14px;
+      padding: 12px 16px;
+      box-shadow: 0 12px 28px -4px rgba(15, 23, 42, 0.2), 0 0 0 1px rgba(15, 23, 42, 0.06);
+      font-family: 'Plus Jakarta Sans', sans-serif;
+      font-size: 12.5px;
+      color: #1e293b;
+      line-height: 1.5;
+      background: #ffffff;
     }
     .maplibregl-popup-close-button {
-      padding: 4px 8px;
+      padding: 6px 10px;
       font-size: 16px;
-      color: #888;
+      color: #94a3b8;
+      border-radius: 0 14px 0 8px;
+      transition: color 0.15s;
+    }
+    .maplibregl-popup-close-button:hover {
+      color: #0f172a;
+      background: transparent;
     }
 
-    /* Bottom Legend Bar */
+    /* Bottom Floating Legend Bar */
     .bottom-legend-bar {
       position: absolute;
-      bottom: 12px;
-      left: 12px;
-      right: 12px;
+      bottom: 14px;
+      left: 14px;
+      right: 14px;
       z-index: 10;
       background: rgba(255, 255, 255, 0.94);
-      backdrop-filter: blur(6px);
-      padding: 8px 14px;
-      border-radius: 10px;
-      box-shadow: 0 2px 10px rgba(0,0,0,0.22);
-      font-family: Arial, sans-serif;
+      backdrop-filter: blur(14px);
+      -webkit-backdrop-filter: blur(14px);
+      padding: 8px 16px;
+      border-radius: 12px;
+      box-shadow: 0 6px 20px rgba(15, 23, 42, 0.12), 0 0 0 1px rgba(0, 0, 0, 0.06);
+      font-family: 'Plus Jakarta Sans', sans-serif;
       font-size: 12px;
       display: flex;
       flex-wrap: wrap;
       align-items: center;
       gap: 12px;
-      max-height: 90px;
+      max-height: 85px;
       overflow-y: auto;
+    }
+
+    .bottom-legend-bar::-webkit-scrollbar {
+      width: 5px;
+      height: 5px;
+    }
+    .bottom-legend-bar::-webkit-scrollbar-thumb {
+      background: #cbd5e1;
+      border-radius: 4px;
+    }
+
+    .legend-wh-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-weight: 800;
+      color: #0f172a;
+      background: #f1f5f9;
+      padding: 4px 10px;
+      border-radius: 20px;
+      border: 1px solid #e2e8f0;
+      white-space: nowrap;
     }
 
     .legend-chip {
       display: inline-flex;
       align-items: center;
+      background: #f8fafc;
+      padding: 4px 10px;
+      border-radius: 20px;
+      border: 1px solid #e2e8f0;
       white-space: nowrap;
+      transition: all 0.15s;
+    }
+    .legend-chip:hover {
+      background: #ffffff;
+      box-shadow: 0 2px 6px rgba(15, 23, 42, 0.08);
+      transform: translateY(-1px);
     }
     .legend-dot {
-      width: 11px;
-      height: 11px;
+      width: 10px;
+      height: 10px;
       border-radius: 50%;
       display: inline-block;
-      margin-right: 5px;
-      border: 1px solid #fff;
-      box-shadow: 0 1px 2px rgba(0,0,0,0.3);
+      margin-right: 6px;
+      border: 1.5px solid #ffffff;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
     }
-    .legend-nav {
-      color: #1a73e8;
+    .legend-nav-pill {
+      background: #eff6ff;
+      color: #2563eb;
       text-decoration: none;
-      font-weight: bold;
-      margin-left: 3px;
+      font-weight: 700;
+      font-size: 11px;
+      margin-left: 6px;
+      padding: 2px 8px;
+      border-radius: 12px;
+      border: 1px solid #bfdbfe;
+      transition: all 0.15s;
     }
-    .legend-nav:hover {
-      text-decoration: underline;
+    .legend-nav-pill:hover {
+      background: #2563eb;
+      color: #ffffff;
+      border-color: #2563eb;
     }
   </style>
 </head>
@@ -280,10 +370,10 @@
 
   <!-- Lasso quick helpers -->
   <div class="lasso-helper-bar">
-    <span>✏️ Lasso:</span>
+    <span class="lasso-title-tag">✏️ Lasso Tool</span>
     <button class="lasso-helper-btn" id="btn-draw-poly" onclick="startPolygonDraw()">⬡ Draw Shape</button>
     <button class="lasso-helper-btn clear" id="btn-clear-draw" onclick="clearLassoDraw()">🗑️ Clear</button>
-    <span id="lasso-status-text" style="color:#666; font-size:10px; margin-left:4px;"></span>
+    <span id="lasso-status-text" class="lasso-hint-badge"></span>
   </div>
 
   <!-- Map element -->
@@ -641,13 +731,23 @@
 
         const pinUrl = `https://www.google.com/maps?q=${s.raw_lat},${s.raw_lon}`;
         const popupHtml = `
-          <div style="font-family:Arial,sans-serif; font-size:12px; min-width:200px;">
-            <b style="font-size:13px; color:#111;">${s.driver_name} — Stop #${s.sequence}</b><br>
-            <div style="margin-top:4px;"><b>Bag:</b> <span style="font-family:monospace; font-weight:600;">${s.bag}</span></div>
-            <div><b>State/Zone:</b> ${s.area}</div>
-            <div style="margin-top:6px;">
-              <a href="${pinUrl}" target="_blank" style="color:#1a73e8; font-weight:bold; text-decoration:none;">Open Pin in Google Maps ↗</a>
+          <div style="min-width: 220px; font-family:'Plus Jakarta Sans',sans-serif;">
+            <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:6px; border-bottom:1px solid #f1f5f9; padding-bottom:5px;">
+              <div style="display:flex; align-items:center; gap:6px;">
+                <span style="display:inline-block; width:10px; height:10px; border-radius:50%; background:${s.color};"></span>
+                <b style="font-size:13px; color:#0f172a;">${s.driver_name}</b>
+              </div>
+              <span style="background:#0f172a; color:#fff; font-size:10px; font-weight:800; border-radius:10px; padding:2px 7px;">#${s.sequence}</span>
             </div>
+            <div style="margin-bottom:4px; font-size:11.5px; color:#475569;">
+              <b>Bag Code:</b> <code style="font-family:'JetBrains Mono',monospace; font-size:11.5px; background:#f1f5f9; padding:2px 6px; border-radius:4px; color:#0f172a; font-weight:700;">${s.bag}</code>
+            </div>
+            <div style="margin-bottom:8px; font-size:11.5px; color:#475569;">
+              <b>Delivery Zone:</b> <span style="font-weight:700; color:#1e293b;">📍 ${s.area}</span>
+            </div>
+            <a href="${pinUrl}" target="_blank" style="display:flex; align-items:center; justify-content:center; gap:5px; background:#2563eb; color:#ffffff; font-size:11.5px; font-weight:700; text-decoration:none; padding:6px 10px; border-radius:8px; box-shadow:0 1px 3px rgba(37,99,235,0.3); transition:all 0.15s;">
+              <span>🗺️ Open in Google Maps</span> ↗
+            </a>
           </div>
         `;
 
@@ -713,13 +813,13 @@
     const bottomBar = document.getElementById('bottom-bar');
     if (data.legend_chips && data.legend_chips.length > 0) {
       bottomBar.style.display = 'flex';
-      let html = '<span style="margin-right:12px; font-weight:bold; display:inline-flex; align-items:center;">🏠 Ajman WH</span>';
+      let html = '<span class="legend-wh-badge">🏠 Ajman WH (6:30 AM)</span>';
       data.legend_chips.forEach(chip => {
         html += `
           <span class="legend-chip">
             <span class="legend-dot" style="background:${chip.color};"></span>
-            <b>${chip.driver_name}:</b>&nbsp;${chip.total_bags} bags (${chip.total_km} km)&nbsp;
-            <a href="${chip.nav_url}" target="_blank" class="legend-nav">[🗺️ Nav]</a>
+            <b>${chip.driver_name}</b>&nbsp;•&nbsp;<span style="color:#64748b; font-weight:600;">${chip.total_bags} bags (${chip.total_km} km)</span>
+            <a href="${chip.nav_url}" target="_blank" class="legend-nav-pill">🗺️ Nav</a>
           </span>
         `;
       });

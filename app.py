@@ -29,6 +29,303 @@ st.set_page_config(
     layout="wide"
 )
 
+st.markdown("""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;700&display=swap');
+
+html, body, [class*="css"] {
+    font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+
+.block-container {
+    padding-top: 1.5rem !important;
+    padding-bottom: 3rem !important;
+    max-width: 100% !important;
+}
+
+/* Header Banner */
+.lion-header-card {
+    background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+    border-radius: 16px;
+    padding: 20px 24px;
+    margin-bottom: 20px;
+    color: #ffffff;
+    box-shadow: 0 10px 25px -5px rgba(15, 23, 42, 0.25);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 16px;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+}
+.lion-brand-wrap {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+}
+.lion-logo-badge {
+    width: 48px;
+    height: 48px;
+    background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);
+    border-radius: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 26px;
+    box-shadow: 0 4px 14px rgba(245, 158, 11, 0.35);
+}
+.lion-title {
+    font-size: 22px;
+    font-weight: 800;
+    letter-spacing: -0.5px;
+    margin: 0;
+    color: #ffffff;
+}
+.lion-subtitle {
+    font-size: 12.5px;
+    color: #94a3b8;
+    margin: 2px 0 0 0;
+    font-weight: 500;
+}
+.lion-status-badges {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    align-items: center;
+}
+.lion-badge {
+    padding: 5px 12px;
+    border-radius: 20px;
+    font-size: 11.5px;
+    font-weight: 700;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+}
+.lion-badge.live {
+    background: rgba(34, 197, 94, 0.15);
+    color: #4ade80;
+    border: 1px solid rgba(34, 197, 94, 0.3);
+}
+.lion-badge.mode {
+    background: rgba(59, 130, 246, 0.15);
+    color: #60a5fa;
+    border: 1px solid rgba(59, 130, 246, 0.3);
+}
+.lion-badge.wh {
+    background: rgba(245, 158, 11, 0.15);
+    color: #fbbf24;
+    border: 1px solid rgba(245, 158, 11, 0.3);
+}
+
+/* KPI Metric Cards */
+.kpi-container {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 14px;
+    margin-bottom: 20px;
+}
+@media (max-width: 900px) {
+    .kpi-container { grid-template-columns: repeat(2, 1fr); }
+}
+@media (max-width: 500px) {
+    .kpi-container { grid-template-columns: 1fr; }
+}
+.kpi-card {
+    background: #ffffff;
+    border-radius: 14px;
+    padding: 16px 18px;
+    box-shadow: 0 4px 16px -2px rgba(15, 23, 42, 0.06), 0 0 0 1px rgba(15, 23, 42, 0.06);
+    position: relative;
+    overflow: hidden;
+    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.kpi-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 8px 24px -4px rgba(15, 23, 42, 0.1), 0 0 0 1px rgba(15, 23, 42, 0.1);
+}
+.kpi-card-stripe {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 4px;
+}
+.kpi-label {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: #64748b;
+    margin-bottom: 6px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+.kpi-value {
+    font-size: 24px;
+    font-weight: 800;
+    color: #0f172a;
+    line-height: 1.1;
+    margin-bottom: 4px;
+}
+.kpi-sub {
+    font-size: 11.5px;
+    color: #64748b;
+    font-weight: 500;
+}
+
+/* Map Header Bar */
+.map-toolbar-header {
+    background: #ffffff;
+    border-radius: 12px;
+    padding: 12px 18px;
+    margin-bottom: 12px;
+    box-shadow: 0 2px 8px rgba(15, 23, 42, 0.05), 0 0 0 1px rgba(15, 23, 42, 0.06);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 10px;
+}
+
+/* Lasso Panel Container */
+.lasso-panel-box {
+    background: #ffffff;
+    border-radius: 14px;
+    padding: 18px 22px;
+    margin-top: 14px;
+    margin-bottom: 20px;
+    box-shadow: 0 4px 16px -2px rgba(15, 23, 42, 0.08), 0 0 0 1px rgba(245, 158, 11, 0.35);
+    border-left: 5px solid #f59e0b;
+}
+
+/* Driver Cards */
+.driver-dispatch-card {
+    background: #ffffff;
+    border-radius: 14px;
+    padding: 18px 22px;
+    margin-bottom: 16px;
+    box-shadow: 0 4px 16px -2px rgba(15, 23, 42, 0.06), 0 0 0 1px rgba(15, 23, 42, 0.08);
+    transition: all 0.2s ease;
+}
+.driver-dispatch-card:hover {
+    box-shadow: 0 8px 24px -4px rgba(15, 23, 42, 0.1), 0 0 0 1px rgba(15, 23, 42, 0.12);
+}
+.driver-card-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 12px;
+    padding-bottom: 12px;
+    border-bottom: 1px solid #f1f5f9;
+    margin-bottom: 14px;
+}
+.driver-title-grp {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+.driver-color-pill {
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+}
+.driver-card-name {
+    font-size: 16px;
+    font-weight: 800;
+    color: #0f172a;
+}
+.driver-stat-pills {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+.stat-pill {
+    background: #f8fafc;
+    border: 1px solid #e2e8f0;
+    border-radius: 20px;
+    padding: 4px 10px;
+    font-size: 11.5px;
+    font-weight: 700;
+    color: #334155;
+}
+.nav-link-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    background: #eff6ff;
+    color: #1d4ed8 !important;
+    border: 1px solid #bfdbfe;
+    border-radius: 8px;
+    padding: 6px 12px;
+    font-size: 12px;
+    font-weight: 700;
+    text-decoration: none !important;
+    transition: all 0.15s ease;
+}
+.nav-link-btn:hover {
+    background: #1d4ed8;
+    color: #ffffff !important;
+    border-color: #1d4ed8;
+}
+.stop-chip-container {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 8px;
+    margin-bottom: 12px;
+}
+.stop-chip {
+    background: #f8fafc;
+    border: 1px solid #e2e8f0;
+    border-radius: 6px;
+    padding: 3px 8px;
+    font-size: 11.5px;
+    color: #334155;
+    font-weight: 600;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+}
+.stop-chip.return-leg {
+    background: #fffbeb;
+    border-color: #fde68a;
+    color: #92400e;
+}
+
+/* Polished Streamlit buttons */
+.stButton>button {
+    border-radius: 8px !important;
+    font-weight: 700 !important;
+    font-size: 13px !important;
+    transition: all 0.15s ease !important;
+}
+.stDownloadButton>button {
+    border-radius: 8px !important;
+    font-weight: 700 !important;
+    font-size: 13px !important;
+}
+
+/* Sidebar refinement */
+[data-testid="stSidebar"] {
+    background-color: #f8fafc !important;
+    border-right: 1px solid #e2e8f0;
+}
+[data-testid="stSidebar"] .stMarkdown h3 {
+    font-size: 13px !important;
+    font-weight: 800 !important;
+    color: #1e293b !important;
+    text-transform: uppercase !important;
+    letter-spacing: 0.5px !important;
+    margin-top: 14px !important;
+    margin-bottom: 6px !important;
+}
+</style>
+""", unsafe_allow_html=True)
+
 WAREHOUSE_URL = "https://maps.app.goo.gl/KxepQZ1YGK4qYeND7"
 DEFAULT_LOCATION_BOARD_API = "https://api.liondelivery.ae/api/v1/dispatcher/operations/location-board/"
 DB_PATH = "dispatch_history.db"
@@ -1719,11 +2016,51 @@ no_pin_bags = [
     if r.get("Dispatch_Status") in ("ASSIGNED_AREA_FALLBACK_NO_PIN", "MISSING_COORDINATES_IN_PORTAL")
 ]
 
-kpi1, kpi2, kpi3, kpi4 = st.columns(4)
-kpi1.metric("Active Drivers", f"{len(active_driver_ids)} / 7")
-kpi2.metric("Total Bags Assigned", f"{total_bags_assigned} / {len(master_rows)}")
-kpi3.metric("Resting Drivers", ", ".join(resting_drivers_today) if resting_drivers_today else "None")
-kpi4.metric(f"Excluded (>{int(max_dist_input)}km / Oman)", len(excluded_bags))
+dispatch_pct = round((total_bags_assigned / max(1, len(master_rows))) * 100, 1)
+
+st.markdown(f"""
+<div class="lion-header-card">
+  <div class="lion-brand-wrap">
+    <div class="lion-logo-badge">🦁</div>
+    <div>
+      <h1 class="lion-title">Lion Delivery Dispatch Command</h1>
+      <p class="lion-subtitle">UAE Smart Multi-Corridor Route Sequencing & Driver Assignment</p>
+    </div>
+  </div>
+  <div class="lion-status-badges">
+    <span class="lion-badge live">🟢 System Live</span>
+    <span class="lion-badge wh">🏠 Ajman WH Start</span>
+    <span class="lion-badge mode">⚡ MapLibre 3D</span>
+  </div>
+</div>
+
+<div class="kpi-container">
+  <div class="kpi-card">
+    <div class="kpi-card-stripe" style="background:#2563eb;"></div>
+    <div class="kpi-label"><span>🚚</span> Active Drivers</div>
+    <div class="kpi-value">{len(active_driver_ids)} <span style="font-size:16px; font-weight:600; color:#64748b;">/ 7</span></div>
+    <div class="kpi-sub">Assigned on delivery routes today</div>
+  </div>
+  <div class="kpi-card">
+    <div class="kpi-card-stripe" style="background:#16a34a;"></div>
+    <div class="kpi-label"><span>🎒</span> Total Bags Assigned</div>
+    <div class="kpi-value">{total_bags_assigned} <span style="font-size:16px; font-weight:600; color:#64748b;">/ {len(master_rows)}</span></div>
+    <div class="kpi-sub">{dispatch_pct}% total orders dispatched</div>
+  </div>
+  <div class="kpi-card">
+    <div class="kpi-card-stripe" style="background:#8b5cf6;"></div>
+    <div class="kpi-label"><span>☕</span> Resting Drivers</div>
+    <div class="kpi-value" style="font-size:16px; font-weight:700; line-height:1.4; padding-top:4px;">{", ".join(resting_drivers_today) if resting_drivers_today else "None (Full Fleet Active)"}</div>
+    <div class="kpi-sub">Rotated off today</div>
+  </div>
+  <div class="kpi-card">
+    <div class="kpi-card-stripe" style="background:{'#ef4444' if excluded_bags else '#10b981'};"></div>
+    <div class="kpi-label"><span>🚫</span> Excluded Orders</div>
+    <div class="kpi-value" style="color:{'#dc2626' if excluded_bags else '#16a34a'};">{len(excluded_bags)}</div>
+    <div class="kpi-sub">> {int(max_dist_input)}km cutoff or Oman border</div>
+  </div>
+</div>
+""", unsafe_allow_html=True)
 
 if no_pin_bags:
     with st.expander(f"⚠️ {len(no_pin_bags)} Bag(s) Had No Exact Coordinate Pin (Resolved via Area / Short-Link Fallback)", expanded=True):
@@ -1741,10 +2078,16 @@ if no_pin_bags:
 # ==========================================
 # 8. MANUAL CONTROLS
 # ==========================================
+st.markdown("""
+<div style="margin-top: 10px; margin-bottom: 8px;">
+    <span style="font-size: 14px; font-weight: 700; color: #0f172a;">🛠️ Dispatch Adjustment Controls</span>
+    <span style="font-size: 12px; color: #64748b; margin-left: 8px;">Reassign individual orders or swap full driver routes</span>
+</div>
+""", unsafe_allow_html=True)
 ctrl_tab1, ctrl_tab2 = st.tabs(["🔄 Move Single Bag", "🔀 Swap Drivers Between Routes"])
 
 with ctrl_tab1:
-    col_re1, col_re2, col_re3 = st.columns([3, 2, 1.5])
+    col_re1, col_re2, col_re3 = st.columns([3, 2, 1.8])
     bag_options = [
         (f"{r.get(bag_col, '')} | {r.get('Driver_ID', '')} (Stop #{r.get('Stop_Sequence', '-')} • {r.get('City_Area', '')})", idx)
         for idx, r in enumerate(master_rows) if r.get("Resolved_Lat")
@@ -1758,7 +2101,8 @@ with ctrl_tab1:
         "Move To Driver",
         options=active_driver_ids + [f"NOT GOING - VERY FAR (>{int(max_dist_input)}KM)", "NOT GOING - OUTSIDE UAE (OMAN)"]
     )
-    if col_re3.button("Move Bag & Re-Sequence"):
+    col_re3.markdown('<div style="height: 28px;"></div>', unsafe_allow_html=True)
+    if col_re3.button("⚡ Move & Re-Sequence", use_container_width=True):
         old_drv = master_rows[selected_bag_idx]["Driver_ID"]
         if old_drv != target_driver_choice:
             master_rows[selected_bag_idx]["Driver_ID"] = target_driver_choice
@@ -1791,10 +2135,11 @@ with ctrl_tab1:
             st.rerun()
 
 with ctrl_tab2:
-    sc1, sc2, sc3 = st.columns([2, 2, 1.5])
+    sc1, sc2, sc3 = st.columns([2, 2, 1.8])
     swap_driver_a = sc1.selectbox("Driver 1", options=FLEET_DRIVERS, index=0)
     swap_driver_b = sc2.selectbox("Driver 2", options=FLEET_DRIVERS, index=1)
-    if sc3.button("🔀 Swap Entire Route"):
+    sc3.markdown('<div style="height: 28px;"></div>', unsafe_allow_html=True)
+    if sc3.button("🔀 Swap Entire Route", use_container_width=True):
         if swap_driver_a != swap_driver_b:
             for r in master_rows:
                 curr_d = r.get("Assigned_Driver", "")
@@ -1930,7 +2275,22 @@ if map_engine_choice.startswith("MapLibre"):
         "clear_drawing": st.session_state.pop("lasso_clear_requested", False),
     }
 
-    st.info("⚡ **MapLibre GL Mode (v3.2):** GPU WebGL rendering, 3D pitch/rotation (Right-Click+Drag / Ctrl+Drag). Click **⬡ Draw Shape** on the map to lasso pins, switch base layers with top-right buttons.")
+    st.markdown("""
+<div class="map-toolbar-header">
+  <div style="display:flex; align-items:center; gap:8px;">
+    <span style="font-size:18px;">🗺️</span>
+    <b style="font-size:15px; color:#0f172a;">Unified Route & Stop Map</b>
+    <span style="background:#eff6ff; color:#2563eb; font-size:11px; font-weight:800; padding:2px 8px; border-radius:12px; border:1px solid #bfdbfe;">MapLibre WebGL 3D</span>
+  </div>
+  <div style="display:flex; align-items:center; gap:12px; font-size:12px; color:#64748b; font-weight:600;">
+    <span>⚡ <b>3D View:</b> Ctrl + Drag</span>
+    <span>•</span>
+    <span>✏️ <b>Lasso Tool:</b> Click ⬡ Draw Shape</span>
+    <span>•</span>
+    <span>🗺️ <b>Base Layers:</b> Top-Right</span>
+  </div>
+</div>
+""", unsafe_allow_html=True)
     map_ver = st.session_state.get("map_version", 0)
     map_output = _maplibre_component(
         map_data=map_data,
@@ -2141,21 +2501,39 @@ if _active_drawing and _active_drawing.get("geometry"):
         ]
 
         if _lasso_hits:
-            st.success(f"🎯 **{len(_lasso_hits)} pin(s) selected inside your shape**")
+            st.markdown(f"""
+<div class="lasso-panel-box">
+  <div style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px;">
+    <div>
+      <div style="display:flex; align-items:center; gap:8px;">
+        <span style="font-size:20px;">🎯</span>
+        <b style="font-size:16px; color:#0f172a;">Lasso Selection Active: {len(_lasso_hits)} Stop(s) Captured</b>
+      </div>
+      <div style="font-size:12.5px; color:#64748b; margin-top:2px;">
+        Select the target driver below to reassign these stops and auto-resequence routes.
+      </div>
+    </div>
+    <span style="background:#fef3c7; color:#b45309; font-size:11.5px; font-weight:800; padding:4px 12px; border-radius:20px; border:1px solid #fde68a;">
+      Ready to Reassign
+    </span>
+  </div>
+</div>
+""", unsafe_allow_html=True)
 
             # Show a compact table of what was captured
             st.dataframe(
                 [
                     {
-                        "Bag": r.get(bag_col, ""),
+                        "Bag Code": r.get(bag_col, ""),
                         "Current Driver": r.get("Assigned_Driver") or r.get("Driver_ID", "UNASSIGNED"),
-                        "Area": r.get("City_Area", ""),
-                        "Stop #": r.get("Stop_Sequence", "-"),
+                        "Delivery Area": r.get("City_Area", ""),
+                        "Stop Sequence": r.get("Stop_Sequence", "-"),
                     }
                     for r in _lasso_hits
                 ],
                 use_container_width=True,
                 hide_index=True,
+                height=min(220, 38 + len(_lasso_hits) * 35)
             )
 
             _la_col1, _la_col2, _la_col3 = st.columns([3, 2, 1])
@@ -2255,42 +2633,124 @@ btn_col1.download_button(
     label="📥 Download Today's Dispatch Plan (CSV)",
     data=csv_buffer.getvalue().encode("utf-8-sig"),
     file_name=f"dispatch_plan_v3_{date.today().isoformat()}.csv",
-    mime="text/csv"
+    mime="text/csv",
+    use_container_width=True
 )
 
-if btn_col2.button("💾 Confirm & Log Today's Routes to Rotation History"):
+if btn_col2.button("💾 Confirm & Log Today's Routes to Rotation History", use_container_width=True):
     log_dispatch_to_db(master_rows)
     st.success("✅ Saved today's driver assignments to rotation history!")
 
-st.subheader("📲 Driver Lists & Google Maps Navigation Links (Primary First ➔ Return Cluster)")
-for d_name in active_driver_ids:
+st.markdown('<div style="height: 16px;"></div>', unsafe_allow_html=True)
+st.markdown("""
+<div style="margin-bottom: 14px;">
+    <div style="font-size: 18px; font-weight: 800; color: #0f172a;">📲 Driver Route Plans & Turn-by-Turn Navigation</div>
+    <div style="font-size: 12.5px; color: #64748b; font-weight: 500;">
+        Primary corridor stops dispatched first, followed by return-leg cluster deliveries heading back toward the Ajman warehouse.
+    </div>
+</div>
+""", unsafe_allow_html=True)
+
+for d_idx, d_name in enumerate(active_driver_ids):
     if selected_driver_filter != "Show All Drivers" and selected_driver_filter.lower() not in d_name.lower():
         continue
 
     d_stops = [r for r in master_rows if r["Driver_ID"] == d_name]
+    if not d_stops:
+        continue
+
     d_stops.sort(key=lambda x: int(x["Stop_Sequence"]))
+    drv_color = DRIVER_COLORS[d_idx % len(DRIVER_COLORS)]
     nav_links = build_google_maps_nav_links(wh_lat, wh_lon, d_stops)
-    links_md = " | ".join(f"[{lbl}]({url})" for lbl, url in nav_links)
 
     one_way_km = d_stops[0].get("Route_OneWay_KM", "0")
-    est_fin = d_stops[0].get("Est_Finish_Time", "")
-    est_hrs = d_stops[0].get("Est_Shift_Hours", "")
+    est_fin = d_stops[0].get("Est_Finish_Time", "N/A")
+    est_hrs = d_stops[0].get("Est_Shift_Hours", "N/A")
 
     primary_stops = [s for s in d_stops if s.get("Stop_Phase") == "Primary City"]
     return_stops = [s for s in d_stops if s.get("Stop_Phase") == "Return-Leg Cluster"]
 
-    primary_str = ", ".join(f"#{s['Stop_Sequence']}: {s.get(bag_col, '')} ({s.get('City_Area', '')})" for s in primary_stops)
-    return_str = ", ".join(f"#{s['Stop_Sequence']}: {s.get(bag_col, '')} ({s.get('City_Area', '')})" for s in return_stops)
+    nav_btns_html = " ".join(
+        f'<a href="{url}" target="_blank" class="nav-link-btn">{html.escape(lbl)}</a>'
+        for lbl, url in nav_links
+    )
 
-    card_md = (
-        f"**{d_name}** — **{len(d_stops)} bags** | **{one_way_km} km** | "
-        f"⏱️ Est. Finish: **{est_fin}** ({est_hrs} hrs) — {links_md}\n"
-        f"> **1️⃣ Primary Stops ({len(primary_stops)}):** `{primary_str}`"
+    primary_chips_html = "".join(
+        f'<span class="stop-chip"><strong>#{s.get("Stop_Sequence", "")}</strong> {html.escape(str(s.get(bag_col, "")))} <span style="color:#64748b; font-size:10.5px;">({html.escape(str(s.get("City_Area", "")))})</span></span>'
+        for s in primary_stops
+    )
+
+    return_section_html = ""
+    if return_stops:
+        return_chips_html = "".join(
+            f'<span class="stop-chip return-leg"><strong>#{s.get("Stop_Sequence", "")}</strong> {html.escape(str(s.get(bag_col, "")))} <span style="color:#92400e; font-size:10.5px;">({html.escape(str(s.get("City_Area", "")))})</span></span>'
+            for s in return_stops
+        )
+        return_section_html = f"""
+        <div style="margin-top: 10px;">
+            <div style="font-size: 11.5px; font-weight: 700; color: #b45309; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px;">
+                🔄 2️⃣ Return-Leg Cluster ({len(return_stops)} stops)
+            </div>
+            <div class="stop-chip-container">{return_chips_html}</div>
+        </div>
+        """
+
+    card_html = f"""
+    <div class="driver-dispatch-card">
+        <div class="driver-card-header">
+            <div class="driver-title-grp">
+                <span class="driver-color-pill" style="background-color: {drv_color};"></span>
+                <span class="driver-card-name">{html.escape(d_name)}</span>
+            </div>
+            <div class="driver-stat-pills">
+                <span class="stat-pill">🎒 {len(d_stops)} Bags</span>
+                <span class="stat-pill">🛣️ {one_way_km} km</span>
+                <span class="stat-pill">⏱️ Finish: {html.escape(str(est_fin))}</span>
+                <span class="stat-pill">⏳ Shift: {html.escape(str(est_hrs))} hrs</span>
+            </div>
+        </div>
+        <div style="margin-bottom: 12px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center;">
+            <span style="font-size: 12px; font-weight: 700; color: #475569;">Turn-by-Turn Navigation:</span>
+            {nav_btns_html}
+        </div>
+        <div>
+            <div style="font-size: 11.5px; font-weight: 700; color: #475569; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px;">
+                1️⃣ Outbound Primary Corridor ({len(primary_stops)} stops)
+            </div>
+            <div class="stop-chip-container">{primary_chips_html}</div>
+        </div>
+        {return_section_html}
+    </div>
+    """
+    st.markdown(card_html, unsafe_allow_html=True)
+
+    # 1-Click WhatsApp text generator
+    primary_lines = "\n".join(
+        f"  #{s.get('Stop_Sequence', '')} - {s.get(bag_col, '')} ({s.get('City_Area', '')})"
+        for s in primary_stops
+    )
+    return_lines = "\n".join(
+        f"  #{s.get('Stop_Sequence', '')} - {s.get(bag_col, '')} ({s.get('City_Area', '')})"
+        for s in return_stops
+    ) if return_stops else "  None"
+
+    nav_links_wa = "\n".join(f"• {lbl.replace(' ↗', '')}: {url}" for lbl, url in nav_links)
+
+    wa_msg = (
+        f"🚚 *LION DELIVERY DISPATCH — {date.today().strftime('%A, %d %b %Y')}*\n"
+        f"👤 *Driver:* {d_name}\n"
+        f"📦 *Total Bags:* {len(d_stops)} | 🛣️ *Distance:* ~{one_way_km} km\n"
+        f"⏱️ *Est. Finish:* {est_fin} (Total Shift: ~{est_hrs} hrs)\n\n"
+        f"🗺️ *Google Maps Navigation:*\n{nav_links_wa}\n\n"
+        f"1️⃣ *Outbound Primary Stops ({len(primary_stops)}):*\n{primary_lines}\n"
     )
     if return_stops:
-        card_md += f"\n> **2️⃣ Return-Leg Cluster ({len(return_stops)}):** `{return_str}`"
+        wa_msg += f"\n2️⃣ *Return-Leg Cluster Stops ({len(return_stops)}):*\n{return_lines}\n"
+    wa_msg += "\n⚠️ *Strict Stop Sequence:* Please deliver bags in numerical order to ensure timely customer delivery and route efficiency. Drive safely! 🦁"
 
-    st.markdown(card_md)
+    with st.expander(f"💬 1-Click WhatsApp Dispatch Message for {d_name}", expanded=False):
+        st.caption("Click the copy icon in the upper-right corner of the code box below to paste directly into WhatsApp:")
+        st.code(wa_msg, language="text")
 
 
 
