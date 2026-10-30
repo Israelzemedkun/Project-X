@@ -9,6 +9,7 @@ import re
 import sqlite3
 import urllib.parse
 from datetime import date, datetime, timedelta
+import uuid
 import folium
 from folium.plugins import AntPath, Draw, Fullscreen
 import requests
@@ -322,6 +323,122 @@ html, body, [class*="css"] {
     letter-spacing: 0.5px !important;
     margin-top: 14px !important;
     margin-bottom: 6px !important;
+}
+
+/* Active Work & Live Map Styles */
+.active-work-driver-card {
+    background: #ffffff;
+    border: 1px solid #e2e8f0;
+    border-radius: 14px;
+    padding: 18px 20px;
+    margin-bottom: 18px;
+    box-shadow: 0 4px 14px -2px rgba(15, 23, 42, 0.05);
+}
+.active-driver-badge-hdr {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 10px;
+    padding-bottom: 12px;
+    border-bottom: 1px solid #f1f5f9;
+    margin-bottom: 14px;
+}
+.bag-tile-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+    gap: 10px;
+    margin-top: 10px;
+    margin-bottom: 14px;
+}
+.bag-tile-item {
+    background: #ffffff;
+    border: 1px solid #e2e8f0;
+    border-radius: 10px;
+    padding: 10px 12px;
+    transition: all 0.15s ease;
+}
+.bag-tile-item:hover {
+    border-color: #15803d;
+    box-shadow: 0 4px 12px rgba(21, 128, 61, 0.08);
+}
+.bag-tile-code {
+    font-size: 13px;
+    font-weight: 800;
+    color: #0f172a;
+    font-family: 'JetBrains Mono', monospace;
+}
+.bag-tile-cust {
+    font-size: 12px;
+    font-weight: 600;
+    color: #334155;
+    margin-top: 2px;
+}
+.bag-tile-ref {
+    font-size: 11px;
+    color: #64748b;
+    margin-top: 2px;
+}
+.run-detail-row {
+    background: #f8fafc;
+    border: 1px solid #e2e8f0;
+    border-radius: 10px;
+    padding: 12px 14px;
+    margin-top: 8px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 10px;
+}
+.status-pill-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 3px 9px;
+    border-radius: 9999px;
+    font-size: 11px;
+    font-weight: 700;
+    color: #ffffff;
+}
+.live-counter-grid {
+    display: grid;
+    grid-template-columns: repeat(8, 1fr);
+    gap: 10px;
+    margin-bottom: 16px;
+}
+@media (max-width: 1200px) {
+    .live-counter-grid { grid-template-columns: repeat(4, 1fr); }
+}
+@media (max-width: 600px) {
+    .live-counter-grid { grid-template-columns: repeat(2, 1fr); }
+}
+.live-counter-pill {
+    background: #ffffff;
+    border: 1px solid #e2e8f0;
+    border-radius: 12px;
+    padding: 12px 10px;
+    text-align: center;
+    box-shadow: 0 2px 8px rgba(15, 23, 42, 0.04);
+}
+.live-counter-val {
+    font-size: 22px;
+    font-weight: 800;
+    color: #0f172a;
+    line-height: 1.1;
+}
+.live-counter-lbl {
+    font-size: 10.5px;
+    font-weight: 700;
+    color: #64748b;
+    margin-top: 4px;
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+}
+.order-list-scroll-box {
+    max-height: 650px;
+    overflow-y: auto;
+    padding-right: 6px;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -851,6 +968,142 @@ def pull_all_location_board_bags(base_endpoint, bearer_token):
             break
 
     return list(extracted_map.values()), None
+
+
+# ==========================================
+# LION DELIVERY ACTIVE WORK & LIVE MAP API CLIENT
+# ==========================================
+LION_CLASSIFICATION_INFO = {
+    "UNASSIGNED": {"label": "Unassigned", "color": "#64748b", "symbol": "U"},
+    "ASSIGNED": {"label": "Waiting to Start", "color": "#2563eb", "symbol": "A"},
+    "OUT_FOR_DELIVERY": {"label": "Out for Delivery", "color": "#15803d", "symbol": "O"},
+    "ARRIVED": {"label": "Arrived", "color": "#f59e0b", "symbol": "!"},
+    "DELIVERED": {"label": "Delivered", "color": "#86a890", "symbol": "D"},
+    "RETRY": {"label": "Retry", "color": "#d97706", "symbol": "R"},
+    "RESCHEDULED": {"label": "Rescheduled", "color": "#7c3aed", "symbol": "S"},
+    "RETURN_REQUIRED": {"label": "Return Required", "color": "#dc2626", "symbol": "!"},
+    "RETURNED": {"label": "Returned", "color": "#94a3b8", "symbol": "RT"},
+    "BLOCKED": {"label": "Blocked", "color": "#991b1b", "symbol": "X"},
+}
+
+
+def fetch_lion_active_work(token, search="", driver="", date_from="", date_to=""):
+    clean_tok = token.replace("Bearer ", "").strip()
+    headers = {
+        "Authorization": f"Bearer {clean_tok}",
+        "Accept": "application/json"
+    }
+    params = {
+        "page_size": "50",
+        "ordering": "newest",
+        "view": "ACTIVE"
+    }
+    if search:
+        params["search"] = search
+    if driver:
+        params["driver"] = driver
+    if date_from:
+        params["date_from"] = date_from
+    if date_to:
+        params["date_to"] = date_to
+
+    url = "https://api.liondelivery.ae/api/v1/dispatcher/operations/admin-routes/"
+    try:
+        resp = api_session.get(url, headers=headers, params=params, timeout=20)
+        if resp.status_code == 200:
+            data = resp.json()
+            results = []
+            if isinstance(data, dict):
+                if "data" in data and isinstance(data["data"], dict) and "results" in data["data"]:
+                    results = data["data"]["results"]
+                elif "results" in data:
+                    results = data["results"]
+                elif "data" in data and isinstance(data["data"], list):
+                    results = data["data"]
+            return results, None
+        return None, f"API Error {resp.status_code}: {resp.text[:200]}"
+    except Exception as e:
+        return None, str(e)
+
+
+def fetch_lion_run_reassignment_stops(token, run_id):
+    clean_tok = token.replace("Bearer ", "").strip()
+    headers = {
+        "Authorization": f"Bearer {clean_tok}",
+        "Accept": "application/json"
+    }
+    url = f"https://api.liondelivery.ae/api/v1/dispatcher/operations/delivery-runs/{run_id}/reassignment/"
+    try:
+        resp = api_session.get(url, headers=headers, timeout=20)
+        if resp.status_code == 200:
+            data = resp.json()
+            if isinstance(data, dict) and "data" in data:
+                return data["data"], None
+            return data, None
+        return None, f"API Error {resp.status_code}: {resp.text[:200]}"
+    except Exception as e:
+        return None, str(e)
+
+
+def fetch_lion_drivers_workload(token):
+    clean_tok = token.replace("Bearer ", "").strip()
+    headers = {
+        "Authorization": f"Bearer {clean_tok}",
+        "Accept": "application/json"
+    }
+    url = "https://api.liondelivery.ae/api/v1/dispatcher/drivers/workload/"
+    try:
+        resp = api_session.get(url, headers=headers, timeout=15)
+        if resp.status_code == 200:
+            data = resp.json()
+            if isinstance(data, dict) and "data" in data:
+                return data["data"], None
+            return data, None
+        return None, f"API Error {resp.status_code}: {resp.text[:200]}"
+    except Exception as e:
+        return None, str(e)
+
+
+def reassign_lion_bags(token, source_run_id, stop_ids, target_driver_id, reason="Dispatcher manual reassignment"):
+    clean_tok = token.replace("Bearer ", "").strip()
+    headers = {
+        "Authorization": f"Bearer {clean_tok}",
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "Idempotency-Key": str(uuid.uuid4())
+    }
+    url = f"https://api.liondelivery.ae/api/v1/dispatcher/operations/delivery-runs/{source_run_id}/reassignment/"
+    payload = {
+        "stop_ids": [int(sid) for sid in stop_ids],
+        "target_driver_id": int(target_driver_id),
+        "reason": reason.strip() or "Dispatcher manual reassignment"
+    }
+    try:
+        resp = api_session.post(url, headers=headers, json=payload, timeout=25)
+        if resp.status_code in (200, 201):
+            return resp.json(), None
+        return None, f"Reassignment error {resp.status_code}: {resp.text[:200]}"
+    except Exception as e:
+        return None, str(e)
+
+
+def fetch_lion_live_map(token):
+    clean_tok = token.replace("Bearer ", "").strip()
+    headers = {
+        "Authorization": f"Bearer {clean_tok}",
+        "Accept": "application/json"
+    }
+    url = "https://api.liondelivery.ae/api/v1/dispatcher/live-map/"
+    try:
+        resp = api_session.get(url, headers=headers, timeout=30)
+        if resp.status_code == 200:
+            data = resp.json()
+            if isinstance(data, dict) and "data" in data:
+                return data["data"], None
+            return data, None
+        return None, f"API Error {resp.status_code}: {resp.text[:200]}"
+    except Exception as e:
+        return None, str(e)
 
 
 @st.cache_data(show_spinner=False)
@@ -1685,6 +1938,84 @@ bag_col = "Bag_Number"
 source_name = "manual_csv"
 raw_bytes_len = 0
 
+# ----------------------------------------------------
+# LION DELIVERY PORTAL CREDENTIALS & API SESSION
+# ----------------------------------------------------
+secret_email = ""
+secret_pass = ""
+secret_token = ""
+try:
+    secret_email = st.secrets.get("LION_EMAIL", "")
+    secret_pass = st.secrets.get("LION_PASSWORD", "")
+    secret_token = st.secrets.get("LION_API_TOKEN", "")
+except Exception:
+    secret_email = ""
+
+if "lion_auth_token" not in st.session_state and secret_token:
+    st.session_state["lion_auth_token"] = secret_token
+
+st.sidebar.markdown("### 🔐 Lion Delivery Portal Access")
+ld_user = st.sidebar.text_input("Lion Delivery Email", value=secret_email, key="ld_user_input")
+ld_pass = st.sidebar.text_input("Lion Delivery Password", value=secret_pass, type="password", key="ld_pass_input")
+
+with st.sidebar.expander("🔧 Advanced API / Token Override"):
+    auth_url = st.text_input(
+        "Login Endpoint URL",
+        value="https://api.liondelivery.ae/api/v1/auth/login/",
+        key="ld_auth_url_input"
+    )
+    api_endpoint = st.text_input(
+        "Location-Board Endpoint",
+        value=DEFAULT_LOCATION_BOARD_API,
+        key="ld_loc_board_input"
+    )
+    manual_bearer = st.text_input(
+        "Optional Direct Bearer Token",
+        value=secret_token,
+        type="password",
+        key="ld_manual_token_input"
+    )
+
+auth_col1, auth_col2 = st.sidebar.columns([1.2, 1])
+if auth_col1.button("🔑 Login / Refresh", use_container_width=True, key="btn_login_auth"):
+    if ld_user and ld_pass:
+        with st.spinner("Logging into Lion Delivery... marathon"):
+            fresh_tok, err_msg = obtain_fresh_jwt_token(auth_url, ld_user, ld_pass)
+            if fresh_tok:
+                st.session_state["lion_auth_token"] = fresh_tok
+                st.sidebar.success("✅ Logged in!")
+                st.rerun()
+            elif manual_bearer.strip():
+                st.session_state["lion_auth_token"] = manual_bearer.strip()
+                st.sidebar.success("✅ Token saved!")
+                st.rerun()
+            else:
+                st.sidebar.error(f"Login failed: {err_msg}")
+    elif manual_bearer.strip():
+        st.session_state["lion_auth_token"] = manual_bearer.strip()
+        st.sidebar.success("✅ Token saved!")
+        st.rerun()
+    else:
+        st.sidebar.error("Enter email and password.")
+
+if st.session_state.get("lion_auth_token"):
+    auth_col2.markdown('<div style="padding-top:6px; font-size:12px; font-weight:700; color:#16a34a;">🟢 Connected</div>', unsafe_allow_html=True)
+else:
+    auth_col2.markdown('<div style="padding-top:6px; font-size:12px; font-weight:600; color:#64748b;">⚪ Offline</div>', unsafe_allow_html=True)
+
+st.sidebar.markdown("### 📂 1. Load Delivery Orders (Planner)")
+data_source = st.sidebar.radio(
+    "Input Method:",
+    ["Upload CSV File", "⚡ Live API Sync (location-board)"],
+    index=0
+)
+
+raw_rows = []
+fieldnames = ["Bag_Number", "Map_URL", "Latitude", "Longitude", "Area", "Customer", "Phone", "Bags"]
+bag_col = "Bag_Number"
+source_name = "manual_csv"
+raw_bytes_len = 0
+
 if data_source == "Upload CSV File":
     uploaded_file = st.sidebar.file_uploader("Upload 'lion_delivery_all_bags.csv'", type=["csv"])
     if uploaded_file is not None:
@@ -1698,61 +2029,35 @@ if data_source == "Upload CSV File":
             fieldnames = list(reader.fieldnames)
             bag_col = fieldnames[0]
 else:
-    secret_email = ""
-    secret_pass = ""
-    secret_token = ""
-    try:
-        secret_email = st.secrets.get("LION_EMAIL", "")
-        secret_pass = st.secrets.get("LION_PASSWORD", "")
-        secret_token = st.secrets.get("LION_API_TOKEN", "")
-    except Exception:
-        secret_email = ""
-
-    ld_user = st.sidebar.text_input("Lion Delivery Email", value=secret_email)
-    ld_pass = st.sidebar.text_input("Lion Delivery Password", value=secret_pass, type="password")
-
-    with st.sidebar.expander("🔧 Advanced API / Token Override"):
-        auth_url = st.text_input(
-            "Login Endpoint URL",
-            value="https://api.liondelivery.ae/api/v1/auth/login/"
-        )
-        api_endpoint = st.text_input(
-            "Location-Board Endpoint",
-            value=DEFAULT_LOCATION_BOARD_API
-        )
-        manual_bearer = st.text_input(
-            "Optional Direct Bearer Token",
-            value=secret_token,
-            type="password"
-        )
-
-    if st.sidebar.button("⚡ Fetch Live Location-Board Orders", type="primary"):
-        active_token = ""
-        if ld_user and ld_pass:
-            with st.spinner("Logging in for fresh 15-minute access token..."):
-                fresh_tok, err_msg = obtain_fresh_jwt_token(auth_url, ld_user, ld_pass)
-                if fresh_tok:
-                    active_token = fresh_tok
-                elif manual_bearer.strip():
-                    active_token = manual_bearer.strip()
-                else:
-                    st.sidebar.error(f"Auto-login error: {err_msg}")
-        elif manual_bearer.strip():
-            active_token = manual_bearer.strip()
-        else:
-            st.sidebar.error("Enter your password (or save LION_PASSWORD in Streamlit Secrets).")
+    if st.sidebar.button("⚡ Sync Live Location-Board Bags", type="primary", use_container_width=True):
+        active_token = st.session_state.get("lion_auth_token", "")
+        if not active_token:
+            if ld_user and ld_pass:
+                with st.spinner("Logging in for fresh access token... marathon"):
+                    fresh_tok, err_msg = obtain_fresh_jwt_token(auth_url, ld_user, ld_pass)
+                    if fresh_tok:
+                        active_token = fresh_tok
+                        st.session_state["lion_auth_token"] = fresh_tok
+                    elif manual_bearer.strip():
+                        active_token = manual_bearer.strip()
+                        st.session_state["lion_auth_token"] = active_token
+            elif manual_bearer.strip():
+                active_token = manual_bearer.strip()
+                st.session_state["lion_auth_token"] = active_token
 
         if active_token:
-            with st.spinner("Pulling all pages (including short links) from location-board..."):
+            with st.spinner("Pulling location-board bags... marathon"):
                 pulled_rows, pull_err = pull_all_location_board_bags(api_endpoint, active_token)
                 if pull_err:
                     st.sidebar.error(pull_err)
                 elif pulled_rows:
                     st.session_state["api_raw_rows"] = pulled_rows
                     st.session_state["api_sync_counter"] = st.session_state.get("api_sync_counter", 0) + 1
-                    st.sidebar.success(f"✅ Synced ALL {len(pulled_rows)} bags from location-board!")
+                    st.sidebar.success(f"✅ Synced {len(pulled_rows)} bags!")
                 else:
-                    st.sidebar.warning("Connected successfully, but 0 bags are currently on the location-board.")
+                    st.sidebar.warning("Connected, but 0 bags found on location-board.")
+        else:
+            st.sidebar.error("Please enter email & password to log in.")
 
     if "api_raw_rows" in st.session_state:
         raw_rows = st.session_state["api_raw_rows"]
@@ -1789,969 +2094,1504 @@ wh_lat, wh_lon = resolve_google_maps_url(WAREHOUSE_URL)
 if not wh_lat:
     wh_lat, wh_lon = 25.4052, 55.5136
 
-if not raw_rows:
-    st.info("👋 Upload `lion_delivery_all_bags.csv` OR switch to **⚡ Live API Sync (location-board)** in the sidebar.")
-    with st.expander("📊 View 7-Day Driver Rotation History"):
-        hist_rows = [
-            {
-                "Driver": d,
-                "7-Day KM": round(info["km_7d"], 1),
-                "7-Day Bags": info["bags_7d"],
-                "Distant Trips (7d)": info["distant_count_7d"],
-                "Last Area": info["last_city"]
-            }
-            for d, info in db_stats.items()
-        ]
-        st.table(hist_rows)
-    st.stop()
-
-current_config_sig = (
-    "v3.1_real_geojson_borders",
-    source_name,
-    raw_bytes_len,
-    target_drivers_input,
-    max_bags_local_input,
-    max_bags_distant_input,
-    min_bags_input,
-    max_dist_input,
-    max_route_km_input,
-    tuple(sorted(far_yesterday_input)),
-    tuple(sorted(resting_today_input))
-)
-
-force_rerun = st.sidebar.button("🔄 Re-Run Optimization")
-
-if (
-    "dispatch_data" not in st.session_state
-    or st.session_state.get("config_sig") != current_config_sig
-    or force_rerun
-):
-    with st.spinner("Resolving short links & running Primary-First Sequencing..."):
-        resolved, unresolvable, oman_stops = [], [], []
-        url_col = next((c for c in fieldnames if any(k in c.lower() for k in ["url", "link", "map", "location"])), "Map_URL")
-
-        for row in raw_rows:
-            lat, lon, is_fallback = extract_row_coordinates(row, url_col)
-            if lat and lon:
-                if is_in_oman(lat, lon):
-                    oman_stops.append({
-                        "row_data": row,
-                        "lat": lat,
-                        "lon": lon,
-                        "city": "Oman Territory / Border",
-                        "bags": int(float(row.get("Bags", 1) or 1)),
-                        "is_fallback": is_fallback
-                    })
-                else:
-                    resolved.append({
-                        "row_data": row,
-                        "lat": lat,
-                        "lon": lon,
-                        "bags": int(float(row.get("Bags", 1) or 1)),
-                        "city": identify_uae_city(lat, lon),
-                        "is_fallback": is_fallback
-                    })
-            else:
-                unresolvable.append(row)
-
-        if not resolved:
-            st.error("Could not resolve valid UAE coordinates from the input data.")
-            st.stop()
-
-        all_coords = [(wh_lat, wh_lon)] + [(s["lat"], s["lon"]) for s in resolved]
-        full_matrix = build_road_distance_matrix(all_coords)
-
-        valid_stops, far_stops = [], []
-        for i, stop in enumerate(resolved, start=1):
-            stop["wh_road_km"] = full_matrix[0][i]
-            if stop["wh_road_km"] > max_dist_input:
-                far_stops.append(stop)
-            else:
-                valid_stops.append(stop)
-
-        deliv_coords = [(wh_lat, wh_lon)] + [(s["lat"], s["lon"]) for s in valid_stops]
-        dist_mat = build_road_distance_matrix(deliv_coords)
-        valid_cities = [s["city"] for s in valid_stops]
-
-        routes = build_v2_morning_routes(
-            dist_mat,
-            valid_stops,
-            target_drivers=target_drivers_input,
-            max_local_bags=max_bags_local_input,
-            max_distant_bags=max_bags_distant_input,
-            min_driver_bags=min_bags_input,
-            max_route_km=max_route_km_input
-        )
-
-        driver_route_pairs = assign_drivers_with_rotation(
-            routes, valid_stops, dist_mat,
-            far_yesterday_names=far_yesterday_input,
-            resting_today_names=resting_today_input
-        )
-
-        final_rows = []
-        for d_name, route in driver_route_pairs:
-            ordered, total_km = optimize_route_order(route, dist_mat, valid_cities)
-            total_bags = sum(valid_stops[n - 1]["bags"] for n in ordered)
-            corridor_label = get_primary_route_label(ordered, valid_stops)
-            driver_display = f"{d_name} ({corridor_label})"
-            has_distant_in_route = any(valid_stops[n - 1]["city"] in DISTANT_CITIES for n in ordered)
-
-            route_temp_rows = []
-            prev = 0
-            for seq, node in enumerate(ordered, start=1):
-                stop = valid_stops[node - 1]
-                leg_km = dist_mat[prev][node]
-                prev = node
-                phase_label = (
-                    "Primary City"
-                    if (not has_distant_in_route or stop["city"] in DISTANT_CITIES)
-                    else "Return-Leg Cluster"
-                )
-                status_str = "ASSIGNED_AREA_FALLBACK_NO_PIN" if stop.get("is_fallback") else "ASSIGNED_630AM"
-                item = dict(stop["row_data"])
-                item.update({
-                    "Assigned_Driver": d_name,
-                    "Driver_ID": driver_display,
-                    "Stop_Sequence": seq,
-                    "Stop_Phase": phase_label,
-                    "City_Area": stop["city"],
-                    "Warehouse_Road_KM": round(stop["wh_road_km"], 2),
-                    "Leg_Distance_KM": round(leg_km, 2),
-                    "Route_Total_Bags": total_bags,
-                    "Route_OneWay_KM": round(total_km, 2),
-                    "Resolved_Lat": round(stop["lat"], 6),
-                    "Resolved_Lon": round(stop["lon"], 6),
-                    "Dispatch_Status": status_str
-                })
-                route_temp_rows.append(item)
-
-            est_finish, est_hrs = predict_driver_finish_time(route_temp_rows, total_km)
-            for item in route_temp_rows:
-                item["Est_Finish_Time"] = est_finish
-                item["Est_Shift_Hours"] = est_hrs
-                final_rows.append(item)
-
-        for fs in far_stops:
-            item = dict(fs["row_data"])
-            item.update({
-                "Assigned_Driver": "NOT GOING",
-                "Driver_ID": f"NOT GOING - VERY FAR (>{int(max_dist_input)}KM)",
-                "Stop_Sequence": "",
-                "Stop_Phase": "Excluded",
-                "City_Area": fs["city"],
-                "Warehouse_Road_KM": round(fs["wh_road_km"], 2),
-                "Leg_Distance_KM": "",
-                "Route_Total_Bags": "",
-                "Route_OneWay_KM": "",
-                "Est_Finish_Time": "",
-                "Est_Shift_Hours": "",
-                "Resolved_Lat": round(fs["lat"], 6),
-                "Resolved_Lon": round(fs["lon"], 6),
-                "Dispatch_Status": "UNABLE_TO_DELIVER_TOO_FAR"
-            })
-            final_rows.append(item)
-
-        for os_stop in oman_stops:
-            item = dict(os_stop["row_data"])
-            item.update({
-                "Assigned_Driver": "NOT GOING",
-                "Driver_ID": "NOT GOING - OUTSIDE UAE (OMAN)",
-                "Stop_Sequence": "",
-                "Stop_Phase": "Excluded",
-                "City_Area": "Oman Territory",
-                "Warehouse_Road_KM": "",
-                "Leg_Distance_KM": "",
-                "Route_Total_Bags": "",
-                "Route_OneWay_KM": "",
-                "Est_Finish_Time": "",
-                "Est_Shift_Hours": "",
-                "Resolved_Lat": round(os_stop["lat"], 6),
-                "Resolved_Lon": round(os_stop["lon"], 6),
-                "Dispatch_Status": "EXCLUDED_OUTSIDE_UAE"
-            })
-            final_rows.append(item)
-
-        for bad_row in unresolvable:
-            item = dict(bad_row)
-            item.update({
-                "Assigned_Driver": "UNASSIGNED",
-                "Driver_ID": "NOT GOING - MISSING PIN & AREA",
-                "Stop_Sequence": "",
-                "Stop_Phase": "Missing Location",
-                "City_Area": str(bad_row.get("Area") or "Unknown"),
-                "Warehouse_Road_KM": "",
-                "Leg_Distance_KM": "",
-                "Route_Total_Bags": "",
-                "Route_OneWay_KM": "",
-                "Est_Finish_Time": "",
-                "Est_Shift_Hours": "",
-                "Resolved_Lat": round(wh_lat, 6),
-                "Resolved_Lon": round(wh_lon, 6),
-                "Dispatch_Status": "MISSING_COORDINATES_IN_PORTAL"
-            })
-            final_rows.append(item)
-
-        st.session_state["dispatch_data"] = final_rows
-        st.session_state["config_sig"] = current_config_sig
-
-master_rows = st.session_state["dispatch_data"]
-
-active_driver_ids = []
-active_named_drivers = []
-for r in master_rows:
-    d_id = r.get("Driver_ID", "")
-    d_name = r.get("Assigned_Driver", "")
-    if d_id and "NOT GOING" not in d_id and d_id != "UNASSIGNED":
-        if d_id not in active_driver_ids:
-            active_driver_ids.append(d_id)
-        if d_name and d_name not in active_named_drivers:
-            active_named_drivers.append(d_name)
-
-resting_drivers_today = [d for d in FLEET_DRIVERS if d not in active_named_drivers]
-total_bags_assigned = sum(int(float(r.get("Bags", 1) or 1)) for r in master_rows if "NOT GOING" not in r["Driver_ID"])
-excluded_bags = [r for r in master_rows if "NOT GOING" in r["Driver_ID"]]
-no_pin_bags = [
-    r for r in master_rows
-    if r.get("Dispatch_Status") in ("ASSIGNED_AREA_FALLBACK_NO_PIN", "MISSING_COORDINATES_IN_PORTAL")
-]
-
-dispatch_pct = round((total_bags_assigned / max(1, len(master_rows))) * 100, 1)
-
 st.markdown(f"""
 <div class="lion-header-card">
   <div class="lion-brand-wrap">
     <div class="lion-logo-badge">🦁</div>
     <div>
       <h1 class="lion-title">Lion Delivery Dispatch Command</h1>
-      <p class="lion-subtitle">UAE Smart Multi-Corridor Route Sequencing & Driver Assignment</p>
+      <p class="lion-subtitle">UAE Smart Multi-Corridor Dispatch, Live Tracking & Operations Center</p>
     </div>
   </div>
   <div class="lion-status-badges">
     <span class="lion-badge live">🟢 System Live</span>
-    <span class="lion-badge wh">🏠 Ajman WH Start</span>
-    <span class="lion-badge mode">⚡ MapLibre 3D</span>
-  </div>
-</div>
-
-<div class="kpi-container">
-  <div class="kpi-card">
-    <div class="kpi-card-stripe" style="background:#2563eb;"></div>
-    <div class="kpi-label"><span>🚚</span> Active Drivers</div>
-    <div class="kpi-value">{len(active_driver_ids)} <span style="font-size:16px; font-weight:600; color:#64748b;">/ 7</span></div>
-    <div class="kpi-sub">Assigned on delivery routes today</div>
-  </div>
-  <div class="kpi-card">
-    <div class="kpi-card-stripe" style="background:#16a34a;"></div>
-    <div class="kpi-label"><span>🎒</span> Total Bags Assigned</div>
-    <div class="kpi-value">{total_bags_assigned} <span style="font-size:16px; font-weight:600; color:#64748b;">/ {len(master_rows)}</span></div>
-    <div class="kpi-sub">{dispatch_pct}% total orders dispatched</div>
-  </div>
-  <div class="kpi-card">
-    <div class="kpi-card-stripe" style="background:#8b5cf6;"></div>
-    <div class="kpi-label"><span>☕</span> Resting Drivers</div>
-    <div class="kpi-value" style="font-size:16px; font-weight:700; line-height:1.4; padding-top:4px;">{", ".join(resting_drivers_today) if resting_drivers_today else "None (Full Fleet Active)"}</div>
-    <div class="kpi-sub">Rotated off today</div>
-  </div>
-  <div class="kpi-card">
-    <div class="kpi-card-stripe" style="background:{'#ef4444' if excluded_bags else '#10b981'};"></div>
-    <div class="kpi-label"><span>🚫</span> Excluded Orders</div>
-    <div class="kpi-value" style="color:{'#dc2626' if excluded_bags else '#16a34a'};">{len(excluded_bags)}</div>
-    <div class="kpi-sub">> {int(max_dist_input)}km cutoff or Oman border</div>
+    <span class="lion-badge wh">🏠 Ajman Base</span>
+    <span class="lion-badge mode">⚡ MapLibre GL 3D</span>
   </div>
 </div>
 """, unsafe_allow_html=True)
 
-if no_pin_bags:
-    with st.expander(f"⚠️ {len(no_pin_bags)} Bag(s) Had No Exact Coordinate Pin (Resolved via Area / Short-Link Fallback)", expanded=True):
-        st.table([
-            {
-                "Bag Code": r.get(bag_col, ""),
-                "Map URL": r.get("Map_URL", ""),
-                "Portal Area": r.get("Area", ""),
-                "Assigned To": r.get("Driver_ID", ""),
-                "Stop #": r.get("Stop_Sequence", "-")
-            }
-            for r in no_pin_bags
-        ])
+tab_planner, tab_active_work, tab_live_map = st.tabs([
+    "🧭 1. Dispatch Route Planner & Optimizer",
+    "🏃 2. Dispatched Drivers (Active Work)",
+    "🗺️ 3. Live Operations Map"
+])
 
-# ==========================================
-# 8. MANUAL CONTROLS
-# ==========================================
-st.markdown("""
-<div style="margin-top: 10px; margin-bottom: 8px;">
-    <span style="font-size: 14px; font-weight: 700; color: #0f172a;">🛠️ Dispatch Adjustment Controls</span>
-    <span style="font-size: 12px; color: #64748b; margin-left: 8px;">Reassign individual orders or swap full driver routes</span>
-</div>
-""", unsafe_allow_html=True)
-ctrl_tab1, ctrl_tab2 = st.tabs(["🔄 Move Single Bag", "🔀 Swap Drivers Between Routes"])
-
-with ctrl_tab1:
-    col_re1, col_re2, col_re3 = st.columns([3, 2, 1.8])
-    bag_options = [
-        (f"{r.get(bag_col, '')} | {r.get('Driver_ID', '')} (Stop #{r.get('Stop_Sequence', '-')} • {r.get('City_Area', '')})", idx)
-        for idx, r in enumerate(master_rows) if r.get("Resolved_Lat")
-    ]
-    selected_bag_idx = col_re1.selectbox(
-        "Select Bag to Reassign",
-        options=[idx for _, idx in bag_options],
-        format_func=lambda i: next(lbl for lbl, idx in bag_options if idx == i)
-    )
-    target_driver_choice = col_re2.selectbox(
-        "Move To Driver",
-        options=active_driver_ids + [f"NOT GOING - VERY FAR (>{int(max_dist_input)}KM)", "NOT GOING - OUTSIDE UAE (OMAN)"]
-    )
-    col_re3.markdown('<div style="height: 28px;"></div>', unsafe_allow_html=True)
-    if col_re3.button("⚡ Move & Re-Sequence", use_container_width=True):
-        old_drv = master_rows[selected_bag_idx]["Driver_ID"]
-        if old_drv != target_driver_choice:
-            master_rows[selected_bag_idx]["Driver_ID"] = target_driver_choice
-            if "NOT GOING" not in target_driver_choice:
-                master_rows[selected_bag_idx]["Assigned_Driver"] = target_driver_choice.split(" (")[0]
-                master_rows[selected_bag_idx]["Dispatch_Status"] = "ASSIGNED_MANUAL_OVERRIDE"
-            else:
-                master_rows[selected_bag_idx]["Assigned_Driver"] = "NOT GOING"
-                master_rows[selected_bag_idx]["Dispatch_Status"] = "MANUAL_EXCLUDED"
-
-            for affected_drv in [old_drv, target_driver_choice]:
-                if "NOT GOING" not in affected_drv:
-                    d_indices = [i for i, r in enumerate(master_rows) if r.get("Driver_ID") == affected_drv]
-                    d_rows = [master_rows[i] for i in d_indices]
-                    updated_rows = resequence_driver_stops(d_rows, wh_lat, wh_lon)
-                    for i, updated_row in zip(d_indices, updated_rows):
-                        master_rows[i] = updated_row
-                else:
-                    for r in master_rows:
-                        if r.get("Driver_ID") == affected_drv:
-                            r["Stop_Sequence"] = ""
-                            r["Stop_Phase"] = "Excluded"
-                            r["Leg_Distance_KM"] = ""
-                            r["Route_Total_Bags"] = ""
-                            r["Route_OneWay_KM"] = ""
-                            r["Est_Finish_Time"] = ""
-                            r["Est_Shift_Hours"] = ""
-
-            st.session_state["dispatch_data"] = master_rows
-            st.rerun()
-
-with ctrl_tab2:
-    sc1, sc2, sc3 = st.columns([2, 2, 1.8])
-    swap_driver_a = sc1.selectbox("Driver 1", options=FLEET_DRIVERS, index=0)
-    swap_driver_b = sc2.selectbox("Driver 2", options=FLEET_DRIVERS, index=1)
-    sc3.markdown('<div style="height: 28px;"></div>', unsafe_allow_html=True)
-    if sc3.button("🔀 Swap Entire Route", use_container_width=True):
-        if swap_driver_a != swap_driver_b:
-            for r in master_rows:
-                curr_d = r.get("Assigned_Driver", "")
-                curr_id = r.get("Driver_ID", "")
-                if curr_d == swap_driver_a and " (" in curr_id:
-                    corridor_part = curr_id.split(" (", 1)[1]
-                    r["Assigned_Driver"] = swap_driver_b
-                    r["Driver_ID"] = f"{swap_driver_b} ({corridor_part}"
-                elif curr_d == swap_driver_b and " (" in curr_id:
-                    corridor_part = curr_id.split(" (", 1)[1]
-                    r["Assigned_Driver"] = swap_driver_a
-                    r["Driver_ID"] = f"{swap_driver_a} ({corridor_part}"
-            st.session_state["dispatch_data"] = master_rows
-            st.rerun()
-
-# ==========================================
-# 9. UNIFIED MAP — ROUTES + POLYGON DRAW SELECTOR (MAPLIBRE GL JS / FOLIUM)
-# ==========================================
-route_coords_for_bounds = [(wh_lat, wh_lon)]
-legend_chips = []
-legend_chips_data = []
-seen_marker_coords = {}
-ml_routes = []
-ml_stops = []
-ml_excluded = []
-
-for d_idx, d_name in enumerate(active_driver_ids):
-    if selected_driver_filter != "Show All Drivers" and selected_driver_filter.lower() not in d_name.lower():
-        continue
-
-    color = DRIVER_COLORS[d_idx % len(DRIVER_COLORS)]
-    d_stops = [r for r in master_rows if r["Driver_ID"] == d_name]
-    d_stops.sort(key=lambda x: int(x["Stop_Sequence"]))
-
-    if not d_stops:
-        continue
-
-    total_bags = d_stops[0].get("Route_Total_Bags", len(d_stops))
-    total_km = d_stops[0].get("Route_OneWay_KM", "0")
-    nav_links = build_google_maps_nav_links(wh_lat, wh_lon, d_stops)
-    primary_nav_url = nav_links[0][1] if nav_links else "#"
-
-    waypoints = [(wh_lat, wh_lon)] + [(float(s["Resolved_Lat"]), float(s["Resolved_Lon"])) for s in d_stops]
-    for pt in waypoints:
-        route_coords_for_bounds.append(pt)
-
-    road_polyline = get_osrm_route_geometry(waypoints)
-    ml_routes.append({
-        "driver_name": d_name,
-        "color": color,
-        "total_bags": total_bags,
-        "total_km": total_km,
-        "coordinates": [[pt[1], pt[0]] for pt in road_polyline]
-    })
-
-    for s in d_stops:
-        raw_lat, raw_lon = float(s["Resolved_Lat"]), float(s["Resolved_Lon"])
-        coord_key = (round(raw_lat, 5), round(raw_lon, 5))
-        dup_count = seen_marker_coords.get(coord_key, 0)
-        seen_marker_coords[coord_key] = dup_count + 1
-
-        disp_lat = raw_lat + (dup_count * 0.00014)
-        disp_lon = raw_lon + (dup_count * 0.00014)
-
-        phase_str = s.get("Stop_Phase", "Primary City")
-        is_area_fb = s.get("Dispatch_Status") == "ASSIGNED_AREA_FALLBACK_NO_PIN"
-        border_style = "2px dotted #ff1744" if is_area_fb else ("2px dashed #ffeb3b" if phase_str == "Return-Leg Cluster" else "2px solid #fff")
-
-        pin_url = f"https://www.google.com/maps?q={raw_lat},{raw_lon}"
-        ml_stops.append({
-            "raw_lat": raw_lat,
-            "raw_lon": raw_lon,
-            "disp_lat": disp_lat,
-            "disp_lon": disp_lon,
-            "sequence": str(s.get("Stop_Sequence", "")),
-            "bag": str(s.get(bag_col, "")),
-            "area": str(s.get("City_Area", "")),
-            "driver_name": d_name,
-            "color": color,
-            "border_style": border_style,
-            "pin_url": pin_url,
-        })
-
-    legend_chips_data.append({
-        "driver_name": d_name,
-        "color": color,
-        "total_bags": total_bags,
-        "total_km": total_km,
-        "nav_url": primary_nav_url,
-    })
-
-    legend_chips.append(
-        f'<span style="display:inline-flex; align-items:center; margin-right:14px; margin-bottom:4px; white-space:nowrap;">'
-        f'<span style="background:{color}; width:11px; height:11px; border-radius:50%; display:inline-block; margin-right:5px; border:1px solid #fff;"></span>'
-        f'<b>{d_name}:</b>&nbsp;{total_bags} bags ({total_km} km)&nbsp;'
-        f'<a href="{primary_nav_url}" target="_blank" style="color:#1a73e8; text-decoration:none; font-weight:bold;">[🗺️ Nav]</a>'
-        f'</span>'
-    )
-
-if selected_driver_filter == "Show All Drivers" and excluded_bags:
-    for ex_stop in excluded_bags:
-        ex_lat, ex_lon = float(ex_stop["Resolved_Lat"]), float(ex_stop["Resolved_Lon"])
-        route_coords_for_bounds.append((ex_lat, ex_lon))
-        is_om = "OMAN" in ex_stop["Driver_ID"]
-        icon_color = "#e65100" if is_om else "#212121"
-        ex_label = "OUTSIDE UAE (OMAN)" if is_om else f"EXCLUDED ({ex_stop.get('Driver_ID', '')})"
-        ml_excluded.append({
-            "lat": ex_lat,
-            "lon": ex_lon,
-            "bag": str(ex_stop.get(bag_col, "")),
-            "label": ex_label,
-            "icon_color": icon_color,
-        })
-
-# Render selected engine
-if map_engine_choice.startswith("MapLibre"):
-    map_data = {
-        "warehouse": {
-            "lat": wh_lat,
-            "lon": wh_lon,
-            "name": "Ajman Warehouse (6:30 AM Start)"
-        },
-        "borders": fetch_uae_real_borders_geojson() if show_state_grid else [],
-        "show_borders": show_state_grid,
-        "border_opacity": border_opacity,
-        "route_line_opacity": route_line_opacity,
-        "driver_filter": selected_driver_filter,
-        "routes": ml_routes,
-        "stops": ml_stops,
-        "excluded_stops": ml_excluded,
-        "legend_chips": legend_chips_data,
-        "active_drawing": st.session_state.get("last_lasso_drawing", None),
-        "clear_drawing": st.session_state.pop("lasso_clear_requested", False),
-    }
-
-    st.markdown("""
-<div class="map-toolbar-header">
-  <div style="display:flex; align-items:center; gap:8px;">
-    <span style="font-size:18px;">🗺️</span>
-    <b style="font-size:15px; color:#0f172a;">Unified Route & Stop Map</b>
-    <span style="background:#eff6ff; color:#2563eb; font-size:11px; font-weight:800; padding:2px 8px; border-radius:12px; border:1px solid #bfdbfe;">MapLibre WebGL 3D</span>
-  </div>
-  <div style="display:flex; align-items:center; gap:12px; font-size:12px; color:#64748b; font-weight:600;">
-    <span>⚡ <b>3D View:</b> Ctrl + Drag</span>
-    <span>•</span>
-    <span>✏️ <b>Lasso Tool:</b> Click ⬡ Draw Shape</span>
-    <span>•</span>
-    <span>🗺️ <b>Base Layers:</b> Top-Right</span>
-  </div>
-</div>
-""", unsafe_allow_html=True)
-    map_ver = st.session_state.get("map_version", 0)
-    map_output = _maplibre_component(
-        map_data=map_data,
-        key=f"maplibre_dispatch_map_{map_ver}",
-        default=None
-    )
-else:
-    # Legacy Folium Map
-    m = folium.Map(location=[wh_lat, wh_lon], zoom_start=9, tiles=None, control_scale=True)
-    Fullscreen(position="topleft", force_separate_button=True).add_to(m)
-
-    Draw(
-        export=False,
-        position="topleft",
-        draw_options={
-            "polyline": False,
-            "polygon": True,
-            "circle": False,
-            "marker": False,
-            "circlemarker": False,
-            "rectangle": True,
-        },
-        edit_options={"edit": False}
-    ).add_to(m)
-
-    folium.TileLayer(
-        "https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}",
-        attr="Esri",
-        name="Esri Street Map",
-        overlay=False,
-        control=True
-    ).add_to(m)
-
-    folium.TileLayer(
-        "https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}",
-        attr="Google Satellite",
-        name="Google Satellite + Roads",
-        overlay=False,
-        control=True
-    ).add_to(m)
-
-    folium.TileLayer(
-        "https://mt1.google.com/vt/lyrs=m&x={x}&y={y}&z={z}",
-        attr="Google Maps",
-        name="Google Maps (Streets)",
-        overlay=False,
-        control=True
-    ).add_to(m)
-
-    if show_state_grid:
-        grid_fg = folium.FeatureGroup(name="🗺️ UAE Emirate Borders (Real GeoJSON)", show=True)
-        borders = fetch_uae_real_borders_geojson()
-        for item in borders:
-            state_color = item["color"]
-            feature = {
-                "type": "Feature",
-                "properties": {"name": item["name"], "color": state_color},
-                "geometry": item["geojson"]
-            }
-            folium.GeoJson(
-                feature,
-                style_function=lambda feat, c=state_color, op=border_opacity: {
-                    "color": c,
-                    "weight": 2.5,
-                    "opacity": 0.9,
-                    "dashArray": "6, 4",
-                    "fillColor": c,
-                    "fillOpacity": op,
-                },
-                interactive=False
-            ).add_to(grid_fg)
-
-            label_html = (
-                f'<div style="display:inline-block; background:rgba(255,255,255,0.88); '
-                f'color:{state_color}; border:1.5px solid {state_color}; border-radius:4px; '
-                f'padding:2px 6px; font-family:Arial,sans-serif; font-size:10px; '
-                f'font-weight:800; white-space:nowrap; pointer-events:none; '
-                f'box-shadow:0 1px 3px rgba(0,0,0,0.25);">'
-                f'{item["name"]}</div>'
-            )
-            folium.Marker(
-                location=item["label_pos"],
-                icon=folium.DivIcon(html=label_html, icon_size=(130, 22), icon_anchor=(65, 11))
-            ).add_to(grid_fg)
-        grid_fg.add_to(m)
-
-    folium.Marker(
-        location=[wh_lat, wh_lon],
-        popup="<b>Ajman Warehouse (6:30 AM Start)</b>",
-        tooltip="Ajman Warehouse",
-        icon=folium.Icon(color="black", icon="home", prefix="fa")
-    ).add_to(m)
-
-    for r_entry in ml_routes:
-        d_name = r_entry["driver_name"]
-        color = r_entry["color"]
-        total_bags = r_entry["total_bags"]
-        total_km = r_entry["total_km"]
-        fg = folium.FeatureGroup(name=f"{d_name} ({total_bags} bags | {total_km} km)", show=True)
-        folium_polyline = [[pt[1], pt[0]] for pt in r_entry["coordinates"]]
-        AntPath(locations=folium_polyline, color=color, weight=5, opacity=route_line_opacity, tooltip=d_name).add_to(fg)
-
-        for s in ml_stops:
-            if s["driver_name"] != d_name:
-                continue
-            badge_html = (
-                f'<div style="background:{s["color"]}; color:#fff; border-radius:50%; '
-                f'width:24px; height:24px; text-align:center; font-weight:bold; '
-                f'font-size:11px; line-height:24px; border:{s["border_style"]}; '
-                f'box-shadow:0 2px 4px rgba(0,0,0,0.4);">'
-                f'{s["sequence"]}</div>'
-            )
-            badge = folium.DivIcon(html=badge_html, icon_size=(24, 24), icon_anchor=(12, 12))
-            popup_html = (
-                f'<div style="font-family:Arial,sans-serif; font-size:12px; min-width:200px;">'
-                f'<b>{d_name} — Stop #{s["sequence"]}</b><br>'
-                f'<b>Bag:</b> {s["bag"]}<br>'
-                f'<b>State/Zone:</b> {s["area"]}<br>'
-                f'<a href="{s["pin_url"]}" target="_blank" style="color:#1a73e8; font-weight:bold;">Open Pin ↗</a>'
-                f'</div>'
-            )
-            folium.Marker(
-                location=[s["disp_lat"], s["disp_lon"]],
-                popup=folium.Popup(popup_html, max_width=280),
-                tooltip=f"{s['bag']} • Stop #{s['sequence']} ({s['area']})",
-                icon=badge
-            ).add_to(fg)
-        fg.add_to(m)
-
-    if selected_driver_filter == "Show All Drivers" and ml_excluded:
-        ex_fg = folium.FeatureGroup(name=f"🚫 Excluded Stops ({len(ml_excluded)})", show=True)
-        for ex_stop in ml_excluded:
-            warn_html = (
-                f'<div style="background:{ex_stop["icon_color"]}; color:#fff; border-radius:50%; '
-                f'width:24px; height:24px; text-align:center; font-weight:bold; '
-                f'font-size:11px; line-height:24px; border:2px solid #ff5252;">✕</div>'
-            )
-            warn_badge = folium.DivIcon(html=warn_html, icon_size=(24, 24), icon_anchor=(12, 12))
-            folium.Marker(
-                location=[ex_stop["lat"], ex_stop["lon"]],
-                popup=f"<b>🚫 {ex_stop['label']}</b><br>Bag: {ex_stop['bag']}",
-                tooltip=f"🚫 {ex_stop['label']}: {ex_stop['bag']}",
-                icon=warn_badge
-            ).add_to(ex_fg)
-        ex_fg.add_to(m)
-
-    if len(route_coords_for_bounds) > 1:
-        all_lats = [c[0] for c in route_coords_for_bounds]
-        all_lons = [c[1] for c in route_coords_for_bounds]
-        m.fit_bounds([[min(all_lats), min(all_lons)], [max(all_lats), max(all_lons)]], padding=(35, 35))
-
-    if legend_chips:
-        bottom_bar_html = (
-            '<div style="position:fixed; bottom:10px; left:10px; right:10px; z-index:9999; '
-            'background:rgba(255,255,255,0.94); padding:7px 12px; border-radius:8px; '
-            'box-shadow:0 2px 8px rgba(0,0,0,0.25); font-family:Arial,sans-serif; '
-            'font-size:12px; display:flex; flex-wrap:wrap; align-items:center;">'
-            '<span style="margin-right:14px; font-weight:bold;">🏠 Ajman WH</span>'
-            + "".join(legend_chips)
-            + '</div>'
+with tab_planner:
+    if not raw_rows:
+        st.info("👋 Upload `lion_delivery_all_bags.csv` OR switch to **⚡ Live API Sync (location-board)** in the sidebar to run route optimization.")
+        with st.expander("📊 View 7-Day Driver Rotation History"):
+            hist_rows = [
+                {
+                    "Driver": d,
+                    "7-Day KM": round(info["km_7d"], 1),
+                    "7-Day Bags": info["bags_7d"],
+                    "Distant Trips (7d)": info["distant_count_7d"],
+                    "Last Area": info["last_city"]
+                }
+                for d, info in db_stats.items()
+            ]
+            st.table(hist_rows)
+    else:
+        current_config_sig = (
+            "v3.1_real_geojson_borders",
+            source_name,
+            raw_bytes_len,
+            target_drivers_input,
+            max_bags_local_input,
+            max_bags_distant_input,
+            min_bags_input,
+            max_dist_input,
+            max_route_km_input,
+            tuple(sorted(far_yesterday_input)),
+            tuple(sorted(resting_today_input))
         )
-        m.get_root().html.add_child(folium.Element(bottom_bar_html))
 
-    folium.LayerControl(collapsed=True, position="topright").add_to(m)
-    st.info("✏️ **Folium Legacy Mode:** Use polygon or rectangle draw tool (top-left) to lasso pins.")
-    map_output = st_folium(m, width="100%", height=800, returned_objects=["last_active_drawing"])
+        force_rerun = st.sidebar.button("🔄 Re-Run Optimization")
 
-# ==========================================
-# 9.1 LASSO ASSIGNMENT PANEL — directly below the map
-# ==========================================
-def point_in_polygon(lat, lon, poly_coords_lonlat):
-    """Ray-casting algorithm. poly_coords_lonlat is a list of (lon, lat) GeoJSON tuples."""
-    x, y = lon, lat
-    inside = False
-    n = len(poly_coords_lonlat)
-    for i in range(n):
-        x1, y1 = poly_coords_lonlat[i]
-        x2, y2 = poly_coords_lonlat[(i + 1) % n]
-        if ((y1 > y) != (y2 > y)) and (x < (x2 - x1) * (y - y1) / (y2 - y1 + 1e-12) + x1):
-            inside = not inside
-    return inside
+        if (
+            "dispatch_data" not in st.session_state
+            or st.session_state.get("config_sig") != current_config_sig
+            or force_rerun
+        ):
+            with st.spinner("Resolving short links & running Primary-First Sequencing..."):
+                resolved, unresolvable, oman_stops = [], [], []
+                url_col = next((c for c in fieldnames if any(k in c.lower() for k in ["url", "link", "map", "location"])), "Map_URL")
 
-if map_output and isinstance(map_output, dict):
-    if map_output.get("last_active_drawing"):
-        st.session_state["last_lasso_drawing"] = map_output.get("last_active_drawing")
-    elif "last_active_drawing" in map_output and map_output.get("last_active_drawing") is None:
-        st.session_state["last_lasso_drawing"] = None
+                for row in raw_rows:
+                    lat, lon, is_fallback = extract_row_coordinates(row, url_col)
+                    if lat and lon:
+                        if is_in_oman(lat, lon):
+                            oman_stops.append({
+                                "row_data": row,
+                                "lat": lat,
+                                "lon": lon,
+                                "city": "Oman Territory / Border",
+                                "bags": int(float(row.get("Bags", 1) or 1)),
+                                "is_fallback": is_fallback
+                            })
+                        else:
+                            resolved.append({
+                                "row_data": row,
+                                "lat": lat,
+                                "lon": lon,
+                                "bags": int(float(row.get("Bags", 1) or 1)),
+                                "city": identify_uae_city(lat, lon),
+                                "is_fallback": is_fallback
+                            })
+                    else:
+                        unresolvable.append(row)
 
-_active_drawing = st.session_state.get("last_lasso_drawing", None)
-if _active_drawing and _active_drawing.get("geometry"):
-    _geom_type   = _active_drawing["geometry"]["type"]
-    _geom_coords = _active_drawing["geometry"]["coordinates"]
+                if not resolved:
+                    st.error("Could not resolve valid UAE coordinates from the input data.")
+                    st.stop()
 
-    # GeoJSON stores coordinates as [lon, lat]
-    _poly_pts = []
-    if _geom_type == "Polygon":
-        _poly_pts = [(pt[0], pt[1]) for pt in _geom_coords[0]]
+                all_coords = [(wh_lat, wh_lon)] + [(s["lat"], s["lon"]) for s in resolved]
+                full_matrix = build_road_distance_matrix(all_coords)
 
-    if _poly_pts:
-        _lasso_hits = [
+                valid_stops, far_stops = [], []
+                for i, stop in enumerate(resolved, start=1):
+                    stop["wh_road_km"] = full_matrix[0][i]
+                    if stop["wh_road_km"] > max_dist_input:
+                        far_stops.append(stop)
+                    else:
+                        valid_stops.append(stop)
+
+                deliv_coords = [(wh_lat, wh_lon)] + [(s["lat"], s["lon"]) for s in valid_stops]
+                dist_mat = build_road_distance_matrix(deliv_coords)
+                valid_cities = [s["city"] for s in valid_stops]
+
+                routes = build_v2_morning_routes(
+                    dist_mat,
+                    valid_stops,
+                    target_drivers=target_drivers_input,
+                    max_local_bags=max_bags_local_input,
+                    max_distant_bags=max_bags_distant_input,
+                    min_driver_bags=min_bags_input,
+                    max_route_km=max_route_km_input
+                )
+
+                driver_route_pairs = assign_drivers_with_rotation(
+                    routes, valid_stops, dist_mat,
+                    far_yesterday_names=far_yesterday_input,
+                    resting_today_names=resting_today_input
+                )
+
+                final_rows = []
+                for d_name, route in driver_route_pairs:
+                    ordered, total_km = optimize_route_order(route, dist_mat, valid_cities)
+                    total_bags = sum(valid_stops[n - 1]["bags"] for n in ordered)
+                    corridor_label = get_primary_route_label(ordered, valid_stops)
+                    driver_display = f"{d_name} ({corridor_label})"
+                    has_distant_in_route = any(valid_stops[n - 1]["city"] in DISTANT_CITIES for n in ordered)
+
+                    route_temp_rows = []
+                    prev = 0
+                    for seq, node in enumerate(ordered, start=1):
+                        stop = valid_stops[node - 1]
+                        leg_km = dist_mat[prev][node]
+                        prev = node
+                        phase_label = (
+                            "Primary City"
+                            if (not has_distant_in_route or stop["city"] in DISTANT_CITIES)
+                            else "Return-Leg Cluster"
+                        )
+                        status_str = "ASSIGNED_AREA_FALLBACK_NO_PIN" if stop.get("is_fallback") else "ASSIGNED_630AM"
+                        item = dict(stop["row_data"])
+                        item.update({
+                            "Assigned_Driver": d_name,
+                            "Driver_ID": driver_display,
+                            "Stop_Sequence": seq,
+                            "Stop_Phase": phase_label,
+                            "City_Area": stop["city"],
+                            "Warehouse_Road_KM": round(stop["wh_road_km"], 2),
+                            "Leg_Distance_KM": round(leg_km, 2),
+                            "Route_Total_Bags": total_bags,
+                            "Route_OneWay_KM": round(total_km, 2),
+                            "Resolved_Lat": round(stop["lat"], 6),
+                            "Resolved_Lon": round(stop["lon"], 6),
+                            "Dispatch_Status": status_str
+                        })
+                        route_temp_rows.append(item)
+
+                    est_finish, est_hrs = predict_driver_finish_time(route_temp_rows, total_km)
+                    for item in route_temp_rows:
+                        item["Est_Finish_Time"] = est_finish
+                        item["Est_Shift_Hours"] = est_hrs
+                        final_rows.append(item)
+
+                for fs in far_stops:
+                    item = dict(fs["row_data"])
+                    item.update({
+                        "Assigned_Driver": "NOT GOING",
+                        "Driver_ID": f"NOT GOING - VERY FAR (>{int(max_dist_input)}KM)",
+                        "Stop_Sequence": "",
+                        "Stop_Phase": "Excluded",
+                        "City_Area": fs["city"],
+                        "Warehouse_Road_KM": round(fs["wh_road_km"], 2),
+                        "Leg_Distance_KM": "",
+                        "Route_Total_Bags": "",
+                        "Route_OneWay_KM": "",
+                        "Est_Finish_Time": "",
+                        "Est_Shift_Hours": "",
+                        "Resolved_Lat": round(fs["lat"], 6),
+                        "Resolved_Lon": round(fs["lon"], 6),
+                        "Dispatch_Status": "UNABLE_TO_DELIVER_TOO_FAR"
+                    })
+                    final_rows.append(item)
+
+                for os_stop in oman_stops:
+                    item = dict(os_stop["row_data"])
+                    item.update({
+                        "Assigned_Driver": "NOT GOING",
+                        "Driver_ID": "NOT GOING - OUTSIDE UAE (OMAN)",
+                        "Stop_Sequence": "",
+                        "Stop_Phase": "Excluded",
+                        "City_Area": "Oman Territory",
+                        "Warehouse_Road_KM": "",
+                        "Leg_Distance_KM": "",
+                        "Route_Total_Bags": "",
+                        "Route_OneWay_KM": "",
+                        "Est_Finish_Time": "",
+                        "Est_Shift_Hours": "",
+                        "Resolved_Lat": round(os_stop["lat"], 6),
+                        "Resolved_Lon": round(os_stop["lon"], 6),
+                        "Dispatch_Status": "EXCLUDED_OUTSIDE_UAE"
+                    })
+                    final_rows.append(item)
+
+                for bad_row in unresolvable:
+                    item = dict(bad_row)
+                    item.update({
+                        "Assigned_Driver": "UNASSIGNED",
+                        "Driver_ID": "NOT GOING - MISSING PIN & AREA",
+                        "Stop_Sequence": "",
+                        "Stop_Phase": "Missing Location",
+                        "City_Area": str(bad_row.get("Area") or "Unknown"),
+                        "Warehouse_Road_KM": "",
+                        "Leg_Distance_KM": "",
+                        "Route_Total_Bags": "",
+                        "Route_OneWay_KM": "",
+                        "Est_Finish_Time": "",
+                        "Est_Shift_Hours": "",
+                        "Resolved_Lat": round(wh_lat, 6),
+                        "Resolved_Lon": round(wh_lon, 6),
+                        "Dispatch_Status": "MISSING_COORDINATES_IN_PORTAL"
+                    })
+                    final_rows.append(item)
+
+                st.session_state["dispatch_data"] = final_rows
+                st.session_state["config_sig"] = current_config_sig
+
+        master_rows = st.session_state["dispatch_data"]
+
+        active_driver_ids = []
+        active_named_drivers = []
+        for r in master_rows:
+            d_id = r.get("Driver_ID", "")
+            d_name = r.get("Assigned_Driver", "")
+            if d_id and "NOT GOING" not in d_id and d_id != "UNASSIGNED":
+                if d_id not in active_driver_ids:
+                    active_driver_ids.append(d_id)
+                if d_name and d_name not in active_named_drivers:
+                    active_named_drivers.append(d_name)
+
+        resting_drivers_today = [d for d in FLEET_DRIVERS if d not in active_named_drivers]
+        total_bags_assigned = sum(int(float(r.get("Bags", 1) or 1)) for r in master_rows if "NOT GOING" not in r["Driver_ID"])
+        excluded_bags = [r for r in master_rows if "NOT GOING" in r["Driver_ID"]]
+        no_pin_bags = [
             r for r in master_rows
-            if r.get("Resolved_Lat")
-            and point_in_polygon(
-                float(r["Resolved_Lat"]),
-                float(r["Resolved_Lon"]),
-                _poly_pts
-            )
+            if r.get("Dispatch_Status") in ("ASSIGNED_AREA_FALLBACK_NO_PIN", "MISSING_COORDINATES_IN_PORTAL")
         ]
 
-        if _lasso_hits:
-            st.markdown(f"""
-<div class="lasso-panel-box">
-  <div style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px;">
-    <div>
-      <div style="display:flex; align-items:center; gap:8px;">
-        <span style="font-size:20px;">🎯</span>
-        <b style="font-size:16px; color:#0f172a;">Lasso Selection Active: {len(_lasso_hits)} Stop(s) Captured</b>
-      </div>
-      <div style="font-size:12.5px; color:#64748b; margin-top:2px;">
-        Select the target driver below to reassign these stops and auto-resequence routes.
-      </div>
-    </div>
-    <span style="background:#fef3c7; color:#b45309; font-size:11.5px; font-weight:800; padding:4px 12px; border-radius:20px; border:1px solid #fde68a;">
-      Ready to Reassign
-    </span>
-  </div>
-</div>
-""", unsafe_allow_html=True)
+        dispatch_pct = round((total_bags_assigned / max(1, len(master_rows))) * 100, 1)
 
-            # Show a compact table of what was captured
-            st.dataframe(
-                [
+        st.markdown(f"""
+          </div>
+          <div class="lion-status-badges">
+            <span class="lion-badge live">🟢 System Live</span>
+            <span class="lion-badge wh">🏠 Ajman WH Start</span>
+            <span class="lion-badge mode">⚡ MapLibre 3D</span>
+          </div>
+        </div>
+
+        <div class="kpi-container">
+          <div class="kpi-card">
+            <div class="kpi-card-stripe" style="background:#2563eb;"></div>
+            <div class="kpi-label"><span>🚚</span> Active Drivers</div>
+            <div class="kpi-value">{len(active_driver_ids)} <span style="font-size:16px; font-weight:600; color:#64748b;">/ 7</span></div>
+            <div class="kpi-sub">Assigned on delivery routes today</div>
+          </div>
+          <div class="kpi-card">
+            <div class="kpi-card-stripe" style="background:#16a34a;"></div>
+            <div class="kpi-label"><span>🎒</span> Total Bags Assigned</div>
+            <div class="kpi-value">{total_bags_assigned} <span style="font-size:16px; font-weight:600; color:#64748b;">/ {len(master_rows)}</span></div>
+            <div class="kpi-sub">{dispatch_pct}% total orders dispatched</div>
+          </div>
+          <div class="kpi-card">
+            <div class="kpi-card-stripe" style="background:#8b5cf6;"></div>
+            <div class="kpi-label"><span>☕</span> Resting Drivers</div>
+            <div class="kpi-value" style="font-size:16px; font-weight:700; line-height:1.4; padding-top:4px;">{", ".join(resting_drivers_today) if resting_drivers_today else "None (Full Fleet Active)"}</div>
+            <div class="kpi-sub">Rotated off today</div>
+          </div>
+          <div class="kpi-card">
+            <div class="kpi-card-stripe" style="background:{'#ef4444' if excluded_bags else '#10b981'};"></div>
+            <div class="kpi-label"><span>🚫</span> Excluded Orders</div>
+            <div class="kpi-value" style="color:{'#dc2626' if excluded_bags else '#16a34a'};">{len(excluded_bags)}</div>
+            <div class="kpi-sub">> {int(max_dist_input)}km cutoff or Oman border</div>
+          </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        if no_pin_bags:
+            with st.expander(f"⚠️ {len(no_pin_bags)} Bag(s) Had No Exact Coordinate Pin (Resolved via Area / Short-Link Fallback)", expanded=True):
+                st.table([
                     {
                         "Bag Code": r.get(bag_col, ""),
-                        "Current Driver": r.get("Assigned_Driver") or r.get("Driver_ID", "UNASSIGNED"),
-                        "Delivery Area": r.get("City_Area", ""),
-                        "Stop Sequence": r.get("Stop_Sequence", "-"),
+                        "Map URL": r.get("Map_URL", ""),
+                        "Portal Area": r.get("Area", ""),
+                        "Assigned To": r.get("Driver_ID", ""),
+                        "Stop #": r.get("Stop_Sequence", "-")
                     }
-                    for r in _lasso_hits
-                ],
-                use_container_width=True,
-                hide_index=True,
-                height=min(220, 38 + len(_lasso_hits) * 35)
+                    for r in no_pin_bags
+                ])
+
+        # ==========================================
+        # 8. MANUAL CONTROLS
+        # ==========================================
+        st.markdown("""
+        <div style="margin-top: 10px; margin-bottom: 8px;">
+            <span style="font-size: 14px; font-weight: 700; color: #0f172a;">🛠️ Dispatch Adjustment Controls</span>
+            <span style="font-size: 12px; color: #64748b; margin-left: 8px;">Reassign individual orders or swap full driver routes</span>
+        </div>
+        """, unsafe_allow_html=True)
+        ctrl_tab1, ctrl_tab2 = st.tabs(["🔄 Move Single Bag", "🔀 Swap Drivers Between Routes"])
+
+        with ctrl_tab1:
+            col_re1, col_re2, col_re3 = st.columns([3, 2, 1.8])
+            bag_options = [
+                (f"{r.get(bag_col, '')} | {r.get('Driver_ID', '')} (Stop #{r.get('Stop_Sequence', '-')} • {r.get('City_Area', '')})", idx)
+                for idx, r in enumerate(master_rows) if r.get("Resolved_Lat")
+            ]
+            selected_bag_idx = col_re1.selectbox(
+                "Select Bag to Reassign",
+                options=[idx for _, idx in bag_options],
+                format_func=lambda i: next(lbl for lbl, idx in bag_options if idx == i)
+            )
+            target_driver_choice = col_re2.selectbox(
+                "Move To Driver",
+                options=active_driver_ids + [f"NOT GOING - VERY FAR (>{int(max_dist_input)}KM)", "NOT GOING - OUTSIDE UAE (OMAN)"]
+            )
+            col_re3.markdown('<div style="height: 28px;"></div>', unsafe_allow_html=True)
+            if col_re3.button("⚡ Move & Re-Sequence", use_container_width=True):
+                old_drv = master_rows[selected_bag_idx]["Driver_ID"]
+                if old_drv != target_driver_choice:
+                    master_rows[selected_bag_idx]["Driver_ID"] = target_driver_choice
+                    if "NOT GOING" not in target_driver_choice:
+                        master_rows[selected_bag_idx]["Assigned_Driver"] = target_driver_choice.split(" (")[0]
+                        master_rows[selected_bag_idx]["Dispatch_Status"] = "ASSIGNED_MANUAL_OVERRIDE"
+                    else:
+                        master_rows[selected_bag_idx]["Assigned_Driver"] = "NOT GOING"
+                        master_rows[selected_bag_idx]["Dispatch_Status"] = "MANUAL_EXCLUDED"
+
+                    for affected_drv in [old_drv, target_driver_choice]:
+                        if "NOT GOING" not in affected_drv:
+                            d_indices = [i for i, r in enumerate(master_rows) if r.get("Driver_ID") == affected_drv]
+                            d_rows = [master_rows[i] for i in d_indices]
+                            updated_rows = resequence_driver_stops(d_rows, wh_lat, wh_lon)
+                            for i, updated_row in zip(d_indices, updated_rows):
+                                master_rows[i] = updated_row
+                        else:
+                            for r in master_rows:
+                                if r.get("Driver_ID") == affected_drv:
+                                    r["Stop_Sequence"] = ""
+                                    r["Stop_Phase"] = "Excluded"
+                                    r["Leg_Distance_KM"] = ""
+                                    r["Route_Total_Bags"] = ""
+                                    r["Route_OneWay_KM"] = ""
+                                    r["Est_Finish_Time"] = ""
+                                    r["Est_Shift_Hours"] = ""
+
+                    st.session_state["dispatch_data"] = master_rows
+                    st.rerun()
+
+        with ctrl_tab2:
+            sc1, sc2, sc3 = st.columns([2, 2, 1.8])
+            swap_driver_a = sc1.selectbox("Driver 1", options=FLEET_DRIVERS, index=0)
+            swap_driver_b = sc2.selectbox("Driver 2", options=FLEET_DRIVERS, index=1)
+            sc3.markdown('<div style="height: 28px;"></div>', unsafe_allow_html=True)
+            if sc3.button("🔀 Swap Entire Route", use_container_width=True):
+                if swap_driver_a != swap_driver_b:
+                    for r in master_rows:
+                        curr_d = r.get("Assigned_Driver", "")
+                        curr_id = r.get("Driver_ID", "")
+                        if curr_d == swap_driver_a and " (" in curr_id:
+                            corridor_part = curr_id.split(" (", 1)[1]
+                            r["Assigned_Driver"] = swap_driver_b
+                            r["Driver_ID"] = f"{swap_driver_b} ({corridor_part}"
+                        elif curr_d == swap_driver_b and " (" in curr_id:
+                            corridor_part = curr_id.split(" (", 1)[1]
+                            r["Assigned_Driver"] = swap_driver_a
+                            r["Driver_ID"] = f"{swap_driver_a} ({corridor_part}"
+                    st.session_state["dispatch_data"] = master_rows
+                    st.rerun()
+
+        # ==========================================
+        # 9. UNIFIED MAP — ROUTES + POLYGON DRAW SELECTOR (MAPLIBRE GL JS / FOLIUM)
+        # ==========================================
+        route_coords_for_bounds = [(wh_lat, wh_lon)]
+        legend_chips = []
+        legend_chips_data = []
+        seen_marker_coords = {}
+        ml_routes = []
+        ml_stops = []
+        ml_excluded = []
+
+        for d_idx, d_name in enumerate(active_driver_ids):
+            if selected_driver_filter != "Show All Drivers" and selected_driver_filter.lower() not in d_name.lower():
+                continue
+
+            color = DRIVER_COLORS[d_idx % len(DRIVER_COLORS)]
+            d_stops = [r for r in master_rows if r["Driver_ID"] == d_name]
+            d_stops.sort(key=lambda x: int(x["Stop_Sequence"]))
+
+            if not d_stops:
+                continue
+
+            total_bags = d_stops[0].get("Route_Total_Bags", len(d_stops))
+            total_km = d_stops[0].get("Route_OneWay_KM", "0")
+            nav_links = build_google_maps_nav_links(wh_lat, wh_lon, d_stops)
+            primary_nav_url = nav_links[0][1] if nav_links else "#"
+
+            waypoints = [(wh_lat, wh_lon)] + [(float(s["Resolved_Lat"]), float(s["Resolved_Lon"])) for s in d_stops]
+            for pt in waypoints:
+                route_coords_for_bounds.append(pt)
+
+            road_polyline = get_osrm_route_geometry(waypoints)
+            ml_routes.append({
+                "driver_name": d_name,
+                "color": color,
+                "total_bags": total_bags,
+                "total_km": total_km,
+                "coordinates": [[pt[1], pt[0]] for pt in road_polyline]
+            })
+
+            for s in d_stops:
+                raw_lat, raw_lon = float(s["Resolved_Lat"]), float(s["Resolved_Lon"])
+                coord_key = (round(raw_lat, 5), round(raw_lon, 5))
+                dup_count = seen_marker_coords.get(coord_key, 0)
+                seen_marker_coords[coord_key] = dup_count + 1
+
+                disp_lat = raw_lat + (dup_count * 0.00014)
+                disp_lon = raw_lon + (dup_count * 0.00014)
+
+                phase_str = s.get("Stop_Phase", "Primary City")
+                is_area_fb = s.get("Dispatch_Status") == "ASSIGNED_AREA_FALLBACK_NO_PIN"
+                border_style = "2px dotted #ff1744" if is_area_fb else ("2px dashed #ffeb3b" if phase_str == "Return-Leg Cluster" else "2px solid #fff")
+
+                pin_url = f"https://www.google.com/maps?q={raw_lat},{raw_lon}"
+                ml_stops.append({
+                    "raw_lat": raw_lat,
+                    "raw_lon": raw_lon,
+                    "disp_lat": disp_lat,
+                    "disp_lon": disp_lon,
+                    "sequence": str(s.get("Stop_Sequence", "")),
+                    "bag": str(s.get(bag_col, "")),
+                    "area": str(s.get("City_Area", "")),
+                    "driver_name": d_name,
+                    "color": color,
+                    "border_style": border_style,
+                    "pin_url": pin_url,
+                })
+
+            legend_chips_data.append({
+                "driver_name": d_name,
+                "color": color,
+                "total_bags": total_bags,
+                "total_km": total_km,
+                "nav_url": primary_nav_url,
+            })
+
+            legend_chips.append(
+                f'<span style="display:inline-flex; align-items:center; margin-right:14px; margin-bottom:4px; white-space:nowrap;">'
+                f'<span style="background:{color}; width:11px; height:11px; border-radius:50%; display:inline-block; margin-right:5px; border:1px solid #fff;"></span>'
+                f'<b>{d_name}:</b>&nbsp;{total_bags} bags ({total_km} km)&nbsp;'
+                f'<a href="{primary_nav_url}" target="_blank" style="color:#1a73e8; text-decoration:none; font-weight:bold;">[🗺️ Nav]</a>'
+                f'</span>'
             )
 
-            _la_col1, _la_col2, _la_col3 = st.columns([3, 2, 1])
-            with _la_col1:
-                _lasso_driver = st.selectbox(
-                    "Assign selected pins to driver:",
-                    options=FLEET_DRIVERS,
-                    key="lasso_drv_target"
-                )
-            with _la_col2:
-                st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
-                assign_btn = st.button("⚡ Assign & Re-Sequence", type="primary", use_container_width=True)
-            with _la_col3:
-                st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
-                clear_btn = st.button("❌ Clear Shape", use_container_width=True)
+        if selected_driver_filter == "Show All Drivers" and excluded_bags:
+            for ex_stop in excluded_bags:
+                ex_lat, ex_lon = float(ex_stop["Resolved_Lat"]), float(ex_stop["Resolved_Lon"])
+                route_coords_for_bounds.append((ex_lat, ex_lon))
+                is_om = "OMAN" in ex_stop["Driver_ID"]
+                icon_color = "#e65100" if is_om else "#212121"
+                ex_label = "OUTSIDE UAE (OMAN)" if is_om else f"EXCLUDED ({ex_stop.get('Driver_ID', '')})"
+                ml_excluded.append({
+                    "lat": ex_lat,
+                    "lon": ex_lon,
+                    "bag": str(ex_stop.get(bag_col, "")),
+                    "label": ex_label,
+                    "icon_color": icon_color,
+                })
 
-            if clear_btn:
-                st.session_state["last_lasso_drawing"] = None
-                st.session_state["lasso_clear_requested"] = True
-                st.session_state["map_version"] = st.session_state.get("map_version", 0) + 1
-                st.rerun()
+        # Render selected engine
+        if map_engine_choice.startswith("MapLibre"):
+            map_data = {
+                "warehouse": {
+                    "lat": wh_lat,
+                    "lon": wh_lon,
+                    "name": "Ajman Warehouse (6:30 AM Start)"
+                },
+                "borders": fetch_uae_real_borders_geojson() if show_state_grid else [],
+                "show_borders": show_state_grid,
+                "border_opacity": border_opacity,
+                "route_line_opacity": route_line_opacity,
+                "driver_filter": selected_driver_filter,
+                "routes": ml_routes,
+                "stops": ml_stops,
+                "excluded_stops": ml_excluded,
+                "legend_chips": legend_chips_data,
+                "active_drawing": st.session_state.get("last_lasso_drawing", None),
+                "clear_drawing": st.session_state.pop("lasso_clear_requested", False),
+            }
 
-            if assign_btn:
-                # ██ SNAPSHOT old driver names BEFORE we modify any rows.
-                _old_drivers = {
-                    _hit.get("Assigned_Driver") or _hit.get("Driver_ID", "").split(" (")[0]
-                    for _hit in _lasso_hits
-                    if (_hit.get("Assigned_Driver") or _hit.get("Driver_ID"))
-                    and "NOT GOING" not in (_hit.get("Assigned_Driver") or "")
-                    and "NOT GOING" not in (_hit.get("Driver_ID") or "")
-                }
-
-                # Determine the Driver_ID to stamp on new rows.
-                # Use the existing Driver_ID for _lasso_driver if they already have stops (preserves corridor label); otherwise plain name.
-                _existing_for_new = [
-                    r for r in master_rows
-                    if (r.get("Assigned_Driver") == _lasso_driver or r.get("Driver_ID", "").split(" (")[0] == _lasso_driver)
-                    and " (" in r.get("Driver_ID", "")
-                ]
-                _new_did = _existing_for_new[0]["Driver_ID"] if _existing_for_new else _lasso_driver
-
-                # Update every matching row in master_rows
-                for _hit in _lasso_hits:
-                    _bag_key = _hit.get(bag_col, "")
-                    for _row in master_rows:
-                        if _row.get(bag_col) == _bag_key:
-                            _row["Assigned_Driver"] = _lasso_driver
-                            _row["Driver_ID"]       = _new_did
-                            _row["Dispatch_Status"] = "ASSIGNED_LASSO_SELECTION"
-
-                # Re-sequence ALL touched drivers — old ones lose bags, new one gains them
-                _touched = _old_drivers | {_lasso_driver}
-                for _drv in _touched:
-                    if not _drv or "NOT GOING" in _drv:
-                        continue
-                    _di = [
-                        i for i, r in enumerate(master_rows)
-                        if (r.get("Assigned_Driver") == _drv or r.get("Driver_ID", "").split(" (")[0] == _drv) and r.get("Resolved_Lat")
-                    ]
-                    _dr = [master_rows[i] for i in _di]
-                    if _dr:
-                        _upd = resequence_driver_stops(_dr, wh_lat, wh_lon)
-                        for i, u in zip(_di, _upd):
-                            master_rows[i] = u
-                    else:
-                        # Driver now has zero stops — nothing to resequence, counts are 0
-                        pass
-
-                st.session_state["dispatch_data"] = master_rows
-                st.session_state["last_lasso_drawing"] = None
-                st.session_state["lasso_clear_requested"] = True
-                st.session_state["map_version"] = st.session_state.get("map_version", 0) + 1
-                st.success(f"✅ {len(_lasso_hits)} bag(s) assigned to **{_lasso_driver}** and routes re-sequenced.")
-                st.rerun()
+            st.markdown("""
+        <div class="map-toolbar-header">
+          <div style="display:flex; align-items:center; gap:8px;">
+            <span style="font-size:18px;">🗺️</span>
+            <b style="font-size:15px; color:#0f172a;">Unified Route & Stop Map</b>
+            <span style="background:#eff6ff; color:#2563eb; font-size:11px; font-weight:800; padding:2px 8px; border-radius:12px; border:1px solid #bfdbfe;">MapLibre WebGL 3D</span>
+          </div>
+          <div style="display:flex; align-items:center; gap:12px; font-size:12px; color:#64748b; font-weight:600;">
+            <span>⚡ <b>3D View:</b> Ctrl + Drag</span>
+            <span>•</span>
+            <span>✏️ <b>Lasso Tool:</b> Click ⬡ Draw Shape</span>
+            <span>•</span>
+            <span>🗺️ <b>Base Layers:</b> Top-Right</span>
+          </div>
+        </div>
+        """, unsafe_allow_html=True)
+            map_ver = st.session_state.get("map_version", 0)
+            map_output = _maplibre_component(
+                map_data=map_data,
+                key=f"maplibre_dispatch_map_{map_ver}",
+                default=None
+            )
         else:
-            st.info("🔍 No pins found inside the drawn shape — try drawing a larger polygon.")
+            # Legacy Folium Map
+            m = folium.Map(location=[wh_lat, wh_lon], zoom_start=9, tiles=None, control_scale=True)
+            Fullscreen(position="topleft", force_separate_button=True).add_to(m)
 
-# ==========================================
-# 10. EXPORT & WHATSAPP CARDS
-# ==========================================
-out_fields = list(fieldnames) + [
-    f for f in [
-        "Assigned_Driver", "Driver_ID", "Stop_Sequence", "Stop_Phase", "City_Area",
-        "Warehouse_Road_KM", "Leg_Distance_KM", "Route_Total_Bags",
-        "Route_OneWay_KM", "Est_Finish_Time", "Est_Shift_Hours",
-        "Resolved_Lat", "Resolved_Lon", "Dispatch_Status"
-    ] if f not in fieldnames
-]
+            Draw(
+                export=False,
+                position="topleft",
+                draw_options={
+                    "polyline": False,
+                    "polygon": True,
+                    "circle": False,
+                    "marker": False,
+                    "circlemarker": False,
+                    "rectangle": True,
+                },
+                edit_options={"edit": False}
+            ).add_to(m)
 
-csv_buffer = io.StringIO()
-writer = csv.DictWriter(csv_buffer, fieldnames=out_fields)
-writer.writeheader()
-writer.writerows(master_rows)
+            folium.TileLayer(
+                "https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}",
+                attr="Esri",
+                name="Esri Street Map",
+                overlay=False,
+                control=True
+            ).add_to(m)
 
-btn_col1, btn_col2 = st.columns(2)
-btn_col1.download_button(
-    label="📥 Download Today's Dispatch Plan (CSV)",
-    data=csv_buffer.getvalue().encode("utf-8-sig"),
-    file_name=f"dispatch_plan_v3_{date.today().isoformat()}.csv",
-    mime="text/csv",
-    use_container_width=True
-)
+            folium.TileLayer(
+                "https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}",
+                attr="Google Satellite",
+                name="Google Satellite + Roads",
+                overlay=False,
+                control=True
+            ).add_to(m)
 
-if btn_col2.button("💾 Confirm & Log Today's Routes to Rotation History", use_container_width=True):
-    log_dispatch_to_db(master_rows)
-    st.success("✅ Saved today's driver assignments to rotation history!")
+            folium.TileLayer(
+                "https://mt1.google.com/vt/lyrs=m&x={x}&y={y}&z={z}",
+                attr="Google Maps",
+                name="Google Maps (Streets)",
+                overlay=False,
+                control=True
+            ).add_to(m)
 
-st.markdown('<div style="height: 16px;"></div>', unsafe_allow_html=True)
-st.markdown("""
-<div style="margin-bottom: 14px;">
-    <div style="font-size: 18px; font-weight: 800; color: #0f172a;">📲 Driver Route Plans & Turn-by-Turn Navigation</div>
-    <div style="font-size: 12.5px; color: #64748b; font-weight: 500;">
-        Primary corridor stops dispatched first, followed by return-leg cluster deliveries heading back toward the Ajman warehouse.
-    </div>
-</div>
-""", unsafe_allow_html=True)
+            if show_state_grid:
+                grid_fg = folium.FeatureGroup(name="🗺️ UAE Emirate Borders (Real GeoJSON)", show=True)
+                borders = fetch_uae_real_borders_geojson()
+                for item in borders:
+                    state_color = item["color"]
+                    feature = {
+                        "type": "Feature",
+                        "properties": {"name": item["name"], "color": state_color},
+                        "geometry": item["geojson"]
+                    }
+                    folium.GeoJson(
+                        feature,
+                        style_function=lambda feat, c=state_color, op=border_opacity: {
+                            "color": c,
+                            "weight": 2.5,
+                            "opacity": 0.9,
+                            "dashArray": "6, 4",
+                            "fillColor": c,
+                            "fillOpacity": op,
+                        },
+                        interactive=False
+                    ).add_to(grid_fg)
 
-for d_idx, d_name in enumerate(active_driver_ids):
-    if selected_driver_filter != "Show All Drivers" and selected_driver_filter.lower() not in d_name.lower():
-        continue
+                    label_html = (
+                        f'<div style="display:inline-block; background:rgba(255,255,255,0.88); '
+                        f'color:{state_color}; border:1.5px solid {state_color}; border-radius:4px; '
+                        f'padding:2px 6px; font-family:Arial,sans-serif; font-size:10px; '
+                        f'font-weight:800; white-space:nowrap; pointer-events:none; '
+                        f'box-shadow:0 1px 3px rgba(0,0,0,0.25);">'
+                        f'{item["name"]}</div>'
+                    )
+                    folium.Marker(
+                        location=item["label_pos"],
+                        icon=folium.DivIcon(html=label_html, icon_size=(130, 22), icon_anchor=(65, 11))
+                    ).add_to(grid_fg)
+                grid_fg.add_to(m)
 
-    d_stops = [r for r in master_rows if r["Driver_ID"] == d_name]
-    if not d_stops:
-        continue
+            folium.Marker(
+                location=[wh_lat, wh_lon],
+                popup="<b>Ajman Warehouse (6:30 AM Start)</b>",
+                tooltip="Ajman Warehouse",
+                icon=folium.Icon(color="black", icon="home", prefix="fa")
+            ).add_to(m)
 
-    d_stops.sort(key=lambda x: int(x["Stop_Sequence"]))
-    drv_color = DRIVER_COLORS[d_idx % len(DRIVER_COLORS)]
-    nav_links = build_google_maps_nav_links(wh_lat, wh_lon, d_stops)
+            for r_entry in ml_routes:
+                d_name = r_entry["driver_name"]
+                color = r_entry["color"]
+                total_bags = r_entry["total_bags"]
+                total_km = r_entry["total_km"]
+                fg = folium.FeatureGroup(name=f"{d_name} ({total_bags} bags | {total_km} km)", show=True)
+                folium_polyline = [[pt[1], pt[0]] for pt in r_entry["coordinates"]]
+                AntPath(locations=folium_polyline, color=color, weight=5, opacity=route_line_opacity, tooltip=d_name).add_to(fg)
 
-    one_way_km = d_stops[0].get("Route_OneWay_KM", "0")
-    est_fin = d_stops[0].get("Est_Finish_Time", "N/A")
-    est_hrs = d_stops[0].get("Est_Shift_Hours", "N/A")
+                for s in ml_stops:
+                    if s["driver_name"] != d_name:
+                        continue
+                    badge_html = (
+                        f'<div style="background:{s["color"]}; color:#fff; border-radius:50%; '
+                        f'width:24px; height:24px; text-align:center; font-weight:bold; '
+                        f'font-size:11px; line-height:24px; border:{s["border_style"]}; '
+                        f'box-shadow:0 2px 4px rgba(0,0,0,0.4);">'
+                        f'{s["sequence"]}</div>'
+                    )
+                    badge = folium.DivIcon(html=badge_html, icon_size=(24, 24), icon_anchor=(12, 12))
+                    popup_html = (
+                        f'<div style="font-family:Arial,sans-serif; font-size:12px; min-width:200px;">'
+                        f'<b>{d_name} — Stop #{s["sequence"]}</b><br>'
+                        f'<b>Bag:</b> {s["bag"]}<br>'
+                        f'<b>State/Zone:</b> {s["area"]}<br>'
+                        f'<a href="{s["pin_url"]}" target="_blank" style="color:#1a73e8; font-weight:bold;">Open Pin ↗</a>'
+                        f'</div>'
+                    )
+                    folium.Marker(
+                        location=[s["disp_lat"], s["disp_lon"]],
+                        popup=folium.Popup(popup_html, max_width=280),
+                        tooltip=f"{s['bag']} • Stop #{s['sequence']} ({s['area']})",
+                        icon=badge
+                    ).add_to(fg)
+                fg.add_to(m)
 
-    primary_stops = [s for s in d_stops if s.get("Stop_Phase") == "Primary City"]
-    return_stops = [s for s in d_stops if s.get("Stop_Phase") == "Return-Leg Cluster"]
+            if selected_driver_filter == "Show All Drivers" and ml_excluded:
+                ex_fg = folium.FeatureGroup(name=f"🚫 Excluded Stops ({len(ml_excluded)})", show=True)
+                for ex_stop in ml_excluded:
+                    warn_html = (
+                        f'<div style="background:{ex_stop["icon_color"]}; color:#fff; border-radius:50%; '
+                        f'width:24px; height:24px; text-align:center; font-weight:bold; '
+                        f'font-size:11px; line-height:24px; border:2px solid #ff5252;">✕</div>'
+                    )
+                    warn_badge = folium.DivIcon(html=warn_html, icon_size=(24, 24), icon_anchor=(12, 12))
+                    folium.Marker(
+                        location=[ex_stop["lat"], ex_stop["lon"]],
+                        popup=f"<b>🚫 {ex_stop['label']}</b><br>Bag: {ex_stop['bag']}",
+                        tooltip=f"🚫 {ex_stop['label']}: {ex_stop['bag']}",
+                        icon=warn_badge
+                    ).add_to(ex_fg)
+                ex_fg.add_to(m)
 
-    nav_btns_html = " ".join(
-        f'<a href="{url}" target="_blank" class="nav-link-btn">{html.escape(lbl)}</a>'
-        for lbl, url in nav_links
-    )
+            if len(route_coords_for_bounds) > 1:
+                all_lats = [c[0] for c in route_coords_for_bounds]
+                all_lons = [c[1] for c in route_coords_for_bounds]
+                m.fit_bounds([[min(all_lats), min(all_lons)], [max(all_lats), max(all_lons)]], padding=(35, 35))
 
-    primary_chips_html = "".join(
-        f'<span class="stop-chip"><strong>#{s.get("Stop_Sequence", "")}</strong> {html.escape(str(s.get(bag_col, "")))} <span style="color:#64748b; font-size:10.5px;">({html.escape(str(s.get("City_Area", "")))})</span></span>'
-        for s in primary_stops
-    )
+            if legend_chips:
+                bottom_bar_html = (
+                    '<div style="position:fixed; bottom:10px; left:10px; right:10px; z-index:9999; '
+                    'background:rgba(255,255,255,0.94); padding:7px 12px; border-radius:8px; '
+                    'box-shadow:0 2px 8px rgba(0,0,0,0.25); font-family:Arial,sans-serif; '
+                    'font-size:12px; display:flex; flex-wrap:wrap; align-items:center;">'
+                    '<span style="margin-right:14px; font-weight:bold;">🏠 Ajman WH</span>'
+                    + "".join(legend_chips)
+                    + '</div>'
+                )
+                m.get_root().html.add_child(folium.Element(bottom_bar_html))
 
-    return_section_html = ""
-    if return_stops:
-        return_chips_html = "".join(
-            f'<span class="stop-chip return-leg"><strong>#{s.get("Stop_Sequence", "")}</strong> {html.escape(str(s.get(bag_col, "")))} <span style="color:#92400e; font-size:10.5px;">({html.escape(str(s.get("City_Area", "")))})</span></span>'
-            for s in return_stops
+            folium.LayerControl(collapsed=True, position="topright").add_to(m)
+            st.info("✏️ **Folium Legacy Mode:** Use polygon or rectangle draw tool (top-left) to lasso pins.")
+            map_output = st_folium(m, width="100%", height=800, returned_objects=["last_active_drawing"])
+
+        # ==========================================
+        # 9.1 LASSO ASSIGNMENT PANEL — directly below the map
+        # ==========================================
+        def point_in_polygon(lat, lon, poly_coords_lonlat):
+            """Ray-casting algorithm. poly_coords_lonlat is a list of (lon, lat) GeoJSON tuples."""
+            x, y = lon, lat
+            inside = False
+            n = len(poly_coords_lonlat)
+            for i in range(n):
+                x1, y1 = poly_coords_lonlat[i]
+                x2, y2 = poly_coords_lonlat[(i + 1) % n]
+                if ((y1 > y) != (y2 > y)) and (x < (x2 - x1) * (y - y1) / (y2 - y1 + 1e-12) + x1):
+                    inside = not inside
+            return inside
+
+        if map_output and isinstance(map_output, dict):
+            if map_output.get("last_active_drawing"):
+                st.session_state["last_lasso_drawing"] = map_output.get("last_active_drawing")
+            elif "last_active_drawing" in map_output and map_output.get("last_active_drawing") is None:
+                st.session_state["last_lasso_drawing"] = None
+
+        _active_drawing = st.session_state.get("last_lasso_drawing", None)
+        if _active_drawing and _active_drawing.get("geometry"):
+            _geom_type   = _active_drawing["geometry"]["type"]
+            _geom_coords = _active_drawing["geometry"]["coordinates"]
+
+            # GeoJSON stores coordinates as [lon, lat]
+            _poly_pts = []
+            if _geom_type == "Polygon":
+                _poly_pts = [(pt[0], pt[1]) for pt in _geom_coords[0]]
+
+            if _poly_pts:
+                _lasso_hits = [
+                    r for r in master_rows
+                    if r.get("Resolved_Lat")
+                    and point_in_polygon(
+                        float(r["Resolved_Lat"]),
+                        float(r["Resolved_Lon"]),
+                        _poly_pts
+                    )
+                ]
+
+                if _lasso_hits:
+                    st.markdown(f"""
+        <div class="lasso-panel-box">
+          <div style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px;">
+            <div>
+              <div style="display:flex; align-items:center; gap:8px;">
+                <span style="font-size:20px;">🎯</span>
+                <b style="font-size:16px; color:#0f172a;">Lasso Selection Active: {len(_lasso_hits)} Stop(s) Captured</b>
+              </div>
+              <div style="font-size:12.5px; color:#64748b; margin-top:2px;">
+                Select the target driver below to reassign these stops and auto-resequence routes.
+              </div>
+            </div>
+            <span style="background:#fef3c7; color:#b45309; font-size:11.5px; font-weight:800; padding:4px 12px; border-radius:20px; border:1px solid #fde68a;">
+              Ready to Reassign
+            </span>
+          </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+                    # Show a compact table of what was captured
+                    st.dataframe(
+                        [
+                            {
+                                "Bag Code": r.get(bag_col, ""),
+                                "Current Driver": r.get("Assigned_Driver") or r.get("Driver_ID", "UNASSIGNED"),
+                                "Delivery Area": r.get("City_Area", ""),
+                                "Stop Sequence": r.get("Stop_Sequence", "-"),
+                            }
+                            for r in _lasso_hits
+                        ],
+                        use_container_width=True,
+                        hide_index=True,
+                        height=min(220, 38 + len(_lasso_hits) * 35)
+                    )
+
+                    _la_col1, _la_col2, _la_col3 = st.columns([3, 2, 1])
+                    with _la_col1:
+                        _lasso_driver = st.selectbox(
+                            "Assign selected pins to driver:",
+                            options=FLEET_DRIVERS,
+                            key="lasso_drv_target"
+                        )
+                    with _la_col2:
+                        st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
+                        assign_btn = st.button("⚡ Assign & Re-Sequence", type="primary", use_container_width=True)
+                    with _la_col3:
+                        st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
+                        clear_btn = st.button("❌ Clear Shape", use_container_width=True)
+
+                    if clear_btn:
+                        st.session_state["last_lasso_drawing"] = None
+                        st.session_state["lasso_clear_requested"] = True
+                        st.session_state["map_version"] = st.session_state.get("map_version", 0) + 1
+                        st.rerun()
+
+                    if assign_btn:
+                        # ██ SNAPSHOT old driver names BEFORE we modify any rows.
+                        _old_drivers = {
+                            _hit.get("Assigned_Driver") or _hit.get("Driver_ID", "").split(" (")[0]
+                            for _hit in _lasso_hits
+                            if (_hit.get("Assigned_Driver") or _hit.get("Driver_ID"))
+                            and "NOT GOING" not in (_hit.get("Assigned_Driver") or "")
+                            and "NOT GOING" not in (_hit.get("Driver_ID") or "")
+                        }
+
+                        # Determine the Driver_ID to stamp on new rows.
+                        # Use the existing Driver_ID for _lasso_driver if they already have stops (preserves corridor label); otherwise plain name.
+                        _existing_for_new = [
+                            r for r in master_rows
+                            if (r.get("Assigned_Driver") == _lasso_driver or r.get("Driver_ID", "").split(" (")[0] == _lasso_driver)
+                            and " (" in r.get("Driver_ID", "")
+                        ]
+                        _new_did = _existing_for_new[0]["Driver_ID"] if _existing_for_new else _lasso_driver
+
+                        # Update every matching row in master_rows
+                        for _hit in _lasso_hits:
+                            _bag_key = _hit.get(bag_col, "")
+                            for _row in master_rows:
+                                if _row.get(bag_col) == _bag_key:
+                                    _row["Assigned_Driver"] = _lasso_driver
+                                    _row["Driver_ID"]       = _new_did
+                                    _row["Dispatch_Status"] = "ASSIGNED_LASSO_SELECTION"
+
+                        # Re-sequence ALL touched drivers — old ones lose bags, new one gains them
+                        _touched = _old_drivers | {_lasso_driver}
+                        for _drv in _touched:
+                            if not _drv or "NOT GOING" in _drv:
+                                continue
+                            _di = [
+                                i for i, r in enumerate(master_rows)
+                                if (r.get("Assigned_Driver") == _drv or r.get("Driver_ID", "").split(" (")[0] == _drv) and r.get("Resolved_Lat")
+                            ]
+                            _dr = [master_rows[i] for i in _di]
+                            if _dr:
+                                _upd = resequence_driver_stops(_dr, wh_lat, wh_lon)
+                                for i, u in zip(_di, _upd):
+                                    master_rows[i] = u
+                            else:
+                                # Driver now has zero stops — nothing to resequence, counts are 0
+                                pass
+
+                        st.session_state["dispatch_data"] = master_rows
+                        st.session_state["last_lasso_drawing"] = None
+                        st.session_state["lasso_clear_requested"] = True
+                        st.session_state["map_version"] = st.session_state.get("map_version", 0) + 1
+                        st.success(f"✅ {len(_lasso_hits)} bag(s) assigned to **{_lasso_driver}** and routes re-sequenced.")
+                        st.rerun()
+                else:
+                    st.info("🔍 No pins found inside the drawn shape — try drawing a larger polygon.")
+
+        # ==========================================
+        # 10. EXPORT & WHATSAPP CARDS
+        # ==========================================
+        out_fields = list(fieldnames) + [
+            f for f in [
+                "Assigned_Driver", "Driver_ID", "Stop_Sequence", "Stop_Phase", "City_Area",
+                "Warehouse_Road_KM", "Leg_Distance_KM", "Route_Total_Bags",
+                "Route_OneWay_KM", "Est_Finish_Time", "Est_Shift_Hours",
+                "Resolved_Lat", "Resolved_Lon", "Dispatch_Status"
+            ] if f not in fieldnames
+        ]
+
+        csv_buffer = io.StringIO()
+        writer = csv.DictWriter(csv_buffer, fieldnames=out_fields)
+        writer.writeheader()
+        writer.writerows(master_rows)
+
+        btn_col1, btn_col2 = st.columns(2)
+        btn_col1.download_button(
+            label="📥 Download Today's Dispatch Plan (CSV)",
+            data=csv_buffer.getvalue().encode("utf-8-sig"),
+            file_name=f"dispatch_plan_v3_{date.today().isoformat()}.csv",
+            mime="text/csv",
+            use_container_width=True
         )
-        return_section_html = f"""
-        <div style="margin-top: 10px;">
-            <div style="font-size: 11.5px; font-weight: 700; color: #b45309; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px;">
-                🔄 2️⃣ Return-Leg Cluster ({len(return_stops)} stops)
-            </div>
-            <div class="stop-chip-container">{return_chips_html}</div>
-        </div>
-        """
 
-    card_html = f"""
-    <div class="driver-dispatch-card">
-        <div class="driver-card-header">
-            <div class="driver-title-grp">
-                <span class="driver-color-pill" style="background-color: {drv_color};"></span>
-                <span class="driver-card-name">{html.escape(d_name)}</span>
-            </div>
-            <div class="driver-stat-pills">
-                <span class="stat-pill">🎒 {len(d_stops)} Bags</span>
-                <span class="stat-pill">🛣️ {one_way_km} km</span>
-                <span class="stat-pill">⏱️ Finish: {html.escape(str(est_fin))}</span>
-                <span class="stat-pill">⏳ Shift: {html.escape(str(est_hrs))} hrs</span>
+        if btn_col2.button("💾 Confirm & Log Today's Routes to Rotation History", use_container_width=True):
+            log_dispatch_to_db(master_rows)
+            st.success("✅ Saved today's driver assignments to rotation history!")
+
+        st.markdown('<div style="height: 16px;"></div>', unsafe_allow_html=True)
+        st.markdown("""
+        <div style="margin-bottom: 14px;">
+            <div style="font-size: 18px; font-weight: 800; color: #0f172a;">📲 Driver Route Plans & Turn-by-Turn Navigation</div>
+            <div style="font-size: 12.5px; color: #64748b; font-weight: 500;">
+                Primary corridor stops dispatched first, followed by return-leg cluster deliveries heading back toward the Ajman warehouse.
             </div>
         </div>
-        <div style="margin-bottom: 12px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center;">
-            <span style="font-size: 12px; font-weight: 700; color: #475569;">Turn-by-Turn Navigation:</span>
-            {nav_btns_html}
-        </div>
+        """, unsafe_allow_html=True)
+
+        for d_idx, d_name in enumerate(active_driver_ids):
+            if selected_driver_filter != "Show All Drivers" and selected_driver_filter.lower() not in d_name.lower():
+                continue
+
+            d_stops = [r for r in master_rows if r["Driver_ID"] == d_name]
+            if not d_stops:
+                continue
+
+            d_stops.sort(key=lambda x: int(x["Stop_Sequence"]))
+            drv_color = DRIVER_COLORS[d_idx % len(DRIVER_COLORS)]
+            nav_links = build_google_maps_nav_links(wh_lat, wh_lon, d_stops)
+
+            one_way_km = d_stops[0].get("Route_OneWay_KM", "0")
+            est_fin = d_stops[0].get("Est_Finish_Time", "N/A")
+            est_hrs = d_stops[0].get("Est_Shift_Hours", "N/A")
+
+            primary_stops = [s for s in d_stops if s.get("Stop_Phase") == "Primary City"]
+            return_stops = [s for s in d_stops if s.get("Stop_Phase") == "Return-Leg Cluster"]
+
+            nav_btns_html = " ".join(
+                f'<a href="{url}" target="_blank" class="nav-link-btn">{html.escape(lbl)}</a>'
+                for lbl, url in nav_links
+            )
+
+            primary_chips_html = "".join(
+                f'<span class="stop-chip"><strong>#{s.get("Stop_Sequence", "")}</strong> {html.escape(str(s.get(bag_col, "")))} <span style="color:#64748b; font-size:10.5px;">({html.escape(str(s.get("City_Area", "")))})</span></span>'
+                for s in primary_stops
+            )
+
+            return_section_html = ""
+            if return_stops:
+                return_chips_html = "".join(
+                    f'<span class="stop-chip return-leg"><strong>#{s.get("Stop_Sequence", "")}</strong> {html.escape(str(s.get(bag_col, "")))} <span style="color:#92400e; font-size:10.5px;">({html.escape(str(s.get("City_Area", "")))})</span></span>'
+                    for s in return_stops
+                )
+                return_section_html = f"""
+                <div style="margin-top: 10px;">
+                    <div style="font-size: 11.5px; font-weight: 700; color: #b45309; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px;">
+                        🔄 2️⃣ Return-Leg Cluster ({len(return_stops)} stops)
+                    </div>
+                    <div class="stop-chip-container">{return_chips_html}</div>
+                </div>
+                """
+
+            card_html = f"""
+            <div class="driver-dispatch-card">
+                <div class="driver-card-header">
+                    <div class="driver-title-grp">
+                        <span class="driver-color-pill" style="background-color: {drv_color};"></span>
+                        <span class="driver-card-name">{html.escape(d_name)}</span>
+                    </div>
+                    <div class="driver-stat-pills">
+                        <span class="stat-pill">🎒 {len(d_stops)} Bags</span>
+                        <span class="stat-pill">🛣️ {one_way_km} km</span>
+                        <span class="stat-pill">⏱️ Finish: {html.escape(str(est_fin))}</span>
+                        <span class="stat-pill">⏳ Shift: {html.escape(str(est_hrs))} hrs</span>
+                    </div>
+                </div>
+                <div style="margin-bottom: 12px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center;">
+                    <span style="font-size: 12px; font-weight: 700; color: #475569;">Turn-by-Turn Navigation:</span>
+                    {nav_btns_html}
+                </div>
+                <div>
+                    <div style="font-size: 11.5px; font-weight: 700; color: #475569; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px;">
+                        1️⃣ Outbound Primary Corridor ({len(primary_stops)} stops)
+                    </div>
+                    <div class="stop-chip-container">{primary_chips_html}</div>
+                </div>
+                {return_section_html}
+            </div>
+            """
+            st.markdown(card_html, unsafe_allow_html=True)
+
+            # 1-Click WhatsApp text generator
+            primary_lines = "\n".join(
+                f"  #{s.get('Stop_Sequence', '')} - {s.get(bag_col, '')} ({s.get('City_Area', '')})"
+                for s in primary_stops
+            )
+            return_lines = "\n".join(
+                f"  #{s.get('Stop_Sequence', '')} - {s.get(bag_col, '')} ({s.get('City_Area', '')})"
+                for s in return_stops
+            ) if return_stops else "  None"
+
+            nav_links_wa = "\n".join(f"• {lbl.replace(' ↗', '')}: {url}" for lbl, url in nav_links)
+
+            wa_msg = (
+                f"🚚 *LION DELIVERY DISPATCH — {date.today().strftime('%A, %d %b %Y')}*\n"
+                f"👤 *Driver:* {d_name}\n"
+                f"📦 *Total Bags:* {len(d_stops)} | 🛣️ *Distance:* ~{one_way_km} km\n"
+                f"⏱️ *Est. Finish:* {est_fin} (Total Shift: ~{est_hrs} hrs)\n\n"
+                f"🗺️ *Google Maps Navigation:*\n{nav_links_wa}\n\n"
+                f"1️⃣ *Outbound Primary Stops ({len(primary_stops)}):*\n{primary_lines}\n"
+            )
+            if return_stops:
+                wa_msg += f"\n2️⃣ *Return-Leg Cluster Stops ({len(return_stops)}):*\n{return_lines}\n"
+            wa_msg += "\n⚠️ *Strict Stop Sequence:* Please deliver bags in numerical order to ensure timely customer delivery and route efficiency. Drive safely! 🦁"
+
+            with st.expander(f"💬 1-Click WhatsApp Dispatch Message for {d_name}", expanded=False):
+                st.caption("Click the copy icon in the upper-right corner of the code box below to paste directly into WhatsApp:")
+                st.code(wa_msg, language="text")
+
+
+
+        # (lasso panel now lives directly below the map — see section 9.1)
+
+# ==========================================
+# 8. TAB 2: DISPATCHED DRIVERS & ACTIVE WORK (/dispatcher/active-work)
+# ==========================================
+with tab_active_work:
+    st.markdown("""
+    <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 14px;">
         <div>
-            <div style="font-size: 11.5px; font-weight: 700; color: #475569; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px;">
-                1️⃣ Outbound Primary Corridor ({len(primary_stops)} stops)
+            <div style="font-size: 20px; font-weight: 800; color: #0f172a;">🏃 Dispatched Drivers & Active Work</div>
+            <div style="font-size: 12.5px; color: #64748b; font-weight: 500;">
+                Live operational runs, assigned bag codes, stop sequences, and exact GPS coordinates from <code>/dispatcher/active-work</code>
             </div>
-            <div class="stop-chip-container">{primary_chips_html}</div>
         </div>
-        {return_section_html}
     </div>
-    """
-    st.markdown(card_html, unsafe_allow_html=True)
+    """, unsafe_allow_html=True)
 
-    # 1-Click WhatsApp text generator
-    primary_lines = "\n".join(
-        f"  #{s.get('Stop_Sequence', '')} - {s.get(bag_col, '')} ({s.get('City_Area', '')})"
-        for s in primary_stops
-    )
-    return_lines = "\n".join(
-        f"  #{s.get('Stop_Sequence', '')} - {s.get(bag_col, '')} ({s.get('City_Area', '')})"
-        for s in return_stops
-    ) if return_stops else "  None"
+    token = st.session_state.get("lion_auth_token")
+    if not token and ld_user and ld_pass:
+        with st.spinner("Connecting to Lion Delivery API..."):
+            fresh_tok, err_msg = obtain_fresh_jwt_token(auth_url, ld_user, ld_pass)
+            if fresh_tok:
+                st.session_state["lion_auth_token"] = fresh_tok
+                token = fresh_tok
 
-    nav_links_wa = "\n".join(f"• {lbl.replace(' ↗', '')}: {url}" for lbl, url in nav_links)
+    if not token:
+        st.warning("⚠️ **Authentication Required**: Please enter your Lion Delivery credentials in the sidebar and click **🔑 Login / Refresh** to view live dispatched drivers.")
+    else:
+        act_col1, act_col2, act_col3 = st.columns([2.5, 1, 1.2])
+        act_search = act_col1.text_input("🔍 Filter by Driver Name or Bag Reference", placeholder="Type driver or bag...", key="act_search_input")
+        refresh_act = act_col2.button("🔄 Refresh Active Work", use_container_width=True, key="btn_refresh_act")
 
-    wa_msg = (
-        f"🚚 *LION DELIVERY DISPATCH — {date.today().strftime('%A, %d %b %Y')}*\n"
-        f"👤 *Driver:* {d_name}\n"
-        f"📦 *Total Bags:* {len(d_stops)} | 🛣️ *Distance:* ~{one_way_km} km\n"
-        f"⏱️ *Est. Finish:* {est_fin} (Total Shift: ~{est_hrs} hrs)\n\n"
-        f"🗺️ *Google Maps Navigation:*\n{nav_links_wa}\n\n"
-        f"1️⃣ *Outbound Primary Stops ({len(primary_stops)}):*\n{primary_lines}\n"
-    )
-    if return_stops:
-        wa_msg += f"\n2️⃣ *Return-Leg Cluster Stops ({len(return_stops)}):*\n{return_lines}\n"
-    wa_msg += "\n⚠️ *Strict Stop Sequence:* Please deliver bags in numerical order to ensure timely customer delivery and route efficiency. Drive safely! 🦁"
+        # Check cache or fetch
+        if "cached_active_work" not in st.session_state or refresh_act:
+            with st.spinner("Fetching active operational runs from portal..."):
+                act_data, act_err = fetch_lion_active_work(token, search=act_search.strip())
+                if act_err:
+                    st.error(f"Failed to fetch active work: {act_err}")
+                    act_data = []
+                st.session_state["cached_active_work"] = act_data
 
-    with st.expander(f"💬 1-Click WhatsApp Dispatch Message for {d_name}", expanded=False):
-        st.caption("Click the copy icon in the upper-right corner of the code box below to paste directly into WhatsApp:")
-        st.code(wa_msg, language="text")
+        active_runs = st.session_state.get("cached_active_work", [])
+
+        # Also fetch workload for reassignment targets
+        if "cached_workload" not in st.session_state or refresh_act:
+            wl_data, _ = fetch_lion_drivers_workload(token)
+            if wl_data:
+                st.session_state["cached_workload"] = wl_data
+
+        fleet_workload = st.session_state.get("cached_workload", [])
+
+        if not active_runs:
+            st.info("ℹ️ No active operational runs found for today on `/dispatcher/active-work`.")
+        else:
+            # Group runs by driver
+            drivers_runs_map = {}
+            for run in active_runs:
+                drv = run.get("driver") or run.get("driver_name") or "Unassigned Driver"
+                if act_search and act_search.lower() not in drv.lower() and not any(act_search.lower() in (str(o.get("bag_code", "")).lower() + str(o.get("order_reference", "")).lower()) for o in run.get("orders", [])):
+                    continue
+                if drv not in drivers_runs_map:
+                    drivers_runs_map[drv] = []
+                drivers_runs_map[drv].append(run)
+
+            total_active_deliveries = sum(
+                sum(len(r.get("orders", [])) or r.get("remaining_stops", 0) for r in r_list)
+                for r_list in drivers_runs_map.values()
+            )
+            act_col3.markdown(
+                f'<div style="background:#f0fdf4; border:1px solid #bbf7d0; border-radius:10px; padding:6px 12px; text-align:center;">'
+                f'<span style="font-size:11px; color:#166534; font-weight:700;">ACTIVE DELIVERIES</span><br>'
+                f'<strong style="font-size:17px; color:#15803d;">{total_active_deliveries} Bags</strong>'
+                f'</div>',
+                unsafe_allow_html=True
+            )
+
+            # Interactive Map data collection
+            active_map_stops = []
+            seen_act_coords = {}
+
+            # Render driver cards
+            for d_idx, (drv_name, drv_runs) in enumerate(drivers_runs_map.items()):
+                d_color = DRIVER_COLORS[d_idx % len(DRIVER_COLORS)]
+                all_orders = []
+                for r in drv_runs:
+                    all_orders.extend(r.get("orders", []))
+
+                total_items = sum(r.get("remaining_stops", len(r.get("orders", []))) for r in drv_runs)
+                num_runs = len(drv_runs)
+
+                st.markdown(f"""
+                <div class="active-work-driver-card">
+                    <div class="active-driver-badge-hdr">
+                        <div style="display:flex; align-items:center; gap:10px;">
+                            <span class="driver-color-pill" style="background-color: {d_color};"></span>
+                            <span style="font-size: 17px; font-weight: 800; color: #0f172a;">{html.escape(drv_name)}</span>
+                        </div>
+                        <div style="display:flex; gap:8px; align-items:center;">
+                            <span class="stat-pill" style="background:#f0fdf4; border-color:#bbf7d0; color:#166534;">
+                                🚀 {num_runs} Active Work • {total_items} item(s)
+                            </span>
+                            <span class="stat-pill">
+                                📦 {len(all_orders)} active deliveries
+                            </span>
+                        </div>
+                    </div>
+                """, unsafe_allow_html=True)
+
+                # Bag Grid (Screenshot 1)
+                if all_orders:
+                    bag_cards_html = []
+                    for ord_item in all_orders:
+                        b_code = ord_item.get("bag_code", "")
+                        c_name = ord_item.get("customer_name", "")
+                        o_ref = ord_item.get("order_reference", "")
+                        stat = ord_item.get("status", "PENDING").replace("_", " ")
+                        bag_cards_html.append(f"""
+                        <div class="bag-tile-item">
+                            <div class="bag-tile-code">{html.escape(b_code)}</div>
+                            <div class="bag-tile-cust">{html.escape(c_name)}</div>
+                            <div class="bag-tile-ref">{html.escape(o_ref)} · <strong style="color:#d97706;">{html.escape(stat)}</strong></div>
+                        </div>
+                        """)
+                    st.markdown(f'<div class="bag-tile-grid">{"".join(bag_cards_html)}</div>', unsafe_allow_html=True)
+
+                # Expandable run details and bag actions (Screenshot 2 & 3)
+                with st.expander(f"▼ Internal run details and Bag actions ({num_runs})"):
+                    for run_idx, run_obj in enumerate(drv_runs):
+                        run_id = run_obj.get("id")
+                        run_code = run_obj.get("run_code", f"Run #{run_id}")
+                        run_status = run_obj.get("status", "IN_PROGRESS").replace("_", " ")
+                        rem_stops = run_obj.get("remaining_stops", 0)
+                        tot_stops = run_obj.get("total_stops", len(run_obj.get("orders", [])))
+
+                        r_col1, r_col2, r_col3 = st.columns([3, 1.2, 1.8])
+                        r_col1.markdown(f"""
+                        <div style="padding-top:4px;">
+                            <strong style="font-size:14px; color:#0f172a;">{html.escape(run_code)}</strong>
+                            <span style="font-size:12px; color:#64748b; margin-left:8px;">Run / route detail</span>
+                            <span class="lion-badge mode" style="margin-left:8px;">{html.escape(run_status)}</span>
+                            <span style="font-size:12px; font-weight:700; color:#334155; margin-left:8px;">{rem_stops}/{tot_stops} stops</span>
+                        </div>
+                        """, unsafe_allow_html=True)
+
+                        portal_link = f"https://app.liondelivery.ae/dispatcher/delivery-runs/{run_id}"
+                        r_col2.markdown(f'<a href="{portal_link}" target="_blank" class="nav-link-btn" style="width:100%; text-align:center;">View Details ↗</a>', unsafe_allow_html=True)
+
+                        view_stops_key = f"view_stops_{run_id}_{drv_name}"
+                        toggle_reassign = r_col3.toggle("Reassign Eligible Bags", key=view_stops_key)
+
+                        if toggle_reassign:
+                            st.markdown(f"""
+                            <div style="background:#fffbeb; border:1px solid #fde68a; border-radius:10px; padding:12px; margin-top:10px; margin-bottom:10px;">
+                                <strong style="color:#92400e; font-size:13px;">Eligible Bags in {html.escape(run_code)}</strong>
+                                <p style="font-size:11.5px; color:#78350f; margin:2px 0 0 0;">
+                                    Select untouched Bags only. Custody, attempts, completed work and returns remain locked.
+                                </p>
+                            </div>
+                            """, unsafe_allow_html=True)
+
+                            cache_run_key = f"run_stops_{run_id}"
+                            if cache_run_key not in st.session_state:
+                                with st.spinner(f"Loading exact Bag locations for {run_code}..."):
+                                    run_detail, run_err = fetch_lion_run_reassignment_stops(token, run_id)
+                                    if run_err:
+                                        st.error(f"Failed to load run details: {run_err}")
+                                        run_detail = {}
+                                    st.session_state[cache_run_key] = run_detail
+
+                            run_detail_data = st.session_state.get(cache_run_key, {})
+                            stops_list = run_detail_data.get("stops", []) if isinstance(run_detail_data, dict) else []
+
+                            if not stops_list:
+                                st.info("No stop details found for this run.")
+                            else:
+                                tbl_rows = []
+                                eligible_stop_options = {}
+                                for s in stops_list:
+                                    s_id = s.get("id")
+                                    b_code = s.get("bag_code", "")
+                                    o_ref = s.get("order_reference", "")
+                                    cust = s.get("customer", "")
+                                    part = s.get("partner", "")
+                                    loc = f"{s.get('area', '')} · {s.get('city_zone') or s.get('emirate', '')}"
+                                    stat = s.get("status", "").replace("_", " ")
+                                    inelig = s.get("ineligibility_reason", "")
+                                    is_elig = s.get("eligible", False)
+                                    lat = s.get("latitude")
+                                    lon = s.get("longitude")
+
+                                    map_u = s.get("customer_location_url", "")
+                                    if lat and lon:
+                                        map_u = f"https://www.google.com/maps?q={lat},{lon}"
+                                        coord_str = f"{float(lat):.5f}, {float(lon):.5f}"
+                                        ckey = (round(float(lat), 5), round(float(lon), 5))
+                                        dup = seen_act_coords.get(ckey, 0)
+                                        seen_act_coords[ckey] = dup + 1
+                                        active_map_stops.append({
+                                            "raw_lat": float(lat),
+                                            "raw_lon": float(lon),
+                                            "disp_lat": float(lat) + (dup * 0.00014),
+                                            "disp_lon": float(lon) + (dup * 0.00014),
+                                            "sequence": str(s.get("sequence", len(active_map_stops)+1)),
+                                            "bag": str(b_code),
+                                            "area": str(loc),
+                                            "driver_name": drv_name,
+                                            "color": d_color,
+                                            "border_style": "2px solid #fff",
+                                            "pin_url": map_u
+                                        })
+                                    else:
+                                        coord_str = "No coordinates"
+
+                                    if is_elig:
+                                        eligible_stop_options[s_id] = f"{b_code} ({o_ref}) - {cust} - {loc}"
+
+                                    tbl_rows.append({
+                                        "Eligible": "✅ Yes" if is_elig else f"🔒 {inelig or 'Locked'}",
+                                        "Bag Code": b_code,
+                                        "Order Reference": o_ref,
+                                        "Customer": cust,
+                                        "Partner": part,
+                                        "Location Area": loc,
+                                        "Status": stat,
+                                        "GPS Coordinates": coord_str,
+                                        "Google Maps": map_u
+                                    })
+
+                                st.dataframe(tbl_rows, use_container_width=True)
+
+                                # Interactive Reassignment Block
+                                if eligible_stop_options and fleet_workload:
+                                    st.markdown("##### 🔀 Reassign Selected Bags in Portal")
+                                    re_col1, re_col2, re_col3 = st.columns([2, 1.5, 1])
+                                    selected_reassign_stops = re_col1.multiselect(
+                                        "Select Untouched Bags to Move",
+                                        options=list(eligible_stop_options.keys()),
+                                        format_func=lambda sid: eligible_stop_options[sid],
+                                        key=f"re_stops_{run_id}"
+                                    )
+                                    target_drivers_opts = [
+                                        d for d in fleet_workload
+                                        if d.get("driver_id") != run_obj.get("driver_id")
+                                    ]
+                                    target_drv_choice = re_col2.selectbox(
+                                        "Move To Target Driver",
+                                        options=target_drivers_opts,
+                                        format_func=lambda d: f"{d.get('driver_name', '')} ({d.get('total_active_tasks', 0)} active tasks)",
+                                        key=f"re_target_{run_id}"
+                                    )
+                                    reason_txt = re_col1.text_input("Reassignment Reason", value="Dispatcher manual route balancing", key=f"re_reason_{run_id}")
+
+                                    if re_col3.button("⚡ Execute Reassignment", key=f"re_exec_{run_id}", disabled=not selected_reassign_stops):
+                                        if selected_reassign_stops and target_drv_choice:
+                                            tgt_id = target_drv_choice.get("driver_id")
+                                            with st.spinner("Executing reassignment on Lion Delivery API..."):
+                                                re_res, re_err = reassign_lion_bags(token, run_id, selected_reassign_stops, tgt_id, reason_txt)
+                                                if re_err:
+                                                    st.error(f"Reassignment failed: {re_err}")
+                                                else:
+                                                    st.success(f"✅ Successfully reassigned {len(selected_reassign_stops)} bags to {target_drv_choice.get('driver_name')}!")
+                                                    st.session_state.pop("cached_active_work", None)
+                                                    st.session_state.pop(cache_run_key, None)
+                                                    st.rerun()
+
+                st.markdown("</div>", unsafe_allow_html=True)
+
+            # Map of all active stops
+            if active_map_stops:
+                st.markdown("---")
+                st.markdown("""
+                <div style="margin-top:14px; margin-bottom:10px;">
+                    <span style="font-size:16px; font-weight:800; color:#0f172a;">🗺️ Dispatched Drivers Interactive Route Map</span>
+                    <span style="font-size:12px; color:#64748b; margin-left:8px;">Live bag coordinates assigned to on-duty drivers</span>
+                </div>
+                """, unsafe_allow_html=True)
+
+                act_map_data = {
+                    "warehouse": {"lat": wh_lat, "lon": wh_lon, "label": "Ajman Warehouse Base"},
+                    "routes": [],
+                    "stops": active_map_stops,
+                    "excluded": [],
+                    "clear_drawing": False
+                }
+                _maplibre_component(map_data=act_map_data, key="maplibre_active_work_map", default=None)
 
 
+# ==========================================
+# 9. TAB 3: LIVE OPERATIONS MAP (/dispatcher/live-map)
+# ==========================================
+with tab_live_map:
+    st.markdown("""
+    <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 14px;">
+        <div>
+            <div style="font-size: 20px; font-weight: 800; color: #0f172a;">🗺️ Live Operations Map</div>
+            <div style="font-size: 12.5px; color: #64748b; font-weight: 500;">
+                Order-level operational positions across the UAE. Driver GPS is not displayed. Direct feed from <code>/dispatcher/live-map</code>
+            </div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
 
-# (lasso panel now lives directly below the map — see section 9.1)
+    token = st.session_state.get("lion_auth_token")
+    if not token and ld_user and ld_pass:
+        with st.spinner("Connecting to Lion Delivery API..."):
+            fresh_tok, err_msg = obtain_fresh_jwt_token(auth_url, ld_user, ld_pass)
+            if fresh_tok:
+                st.session_state["lion_auth_token"] = fresh_tok
+                token = fresh_tok
+
+    if not token:
+        st.warning("⚠️ **Authentication Required**: Please enter your Lion Delivery credentials in the sidebar and click **🔑 Login / Refresh** to sync the Live Map.")
+    else:
+        # Check cache or fetch
+        btn_col_lm1, btn_col_lm2 = st.columns([3, 1])
+        refresh_lm = btn_col_lm2.button("🔄 Refresh Live Map", use_container_width=True, key="btn_refresh_live_map")
+
+        if "cached_live_map" not in st.session_state or refresh_lm:
+            with st.spinner("Loading live orders from portal..."):
+                lm_data, lm_err = fetch_lion_live_map(token)
+                if lm_err:
+                    st.error(f"Failed to fetch live map: {lm_err}")
+                    lm_data = {}
+                st.session_state["cached_live_map"] = lm_data
+
+        live_map_obj = st.session_state.get("cached_live_map", {})
+        raw_markers = live_map_obj.get("markers", []) if isinstance(live_map_obj, dict) else []
+        summary = live_map_obj.get("summary", {}) if isinstance(live_map_obj, dict) else {}
+
+        # Compute dynamic counts if summary is missing
+        if not summary and raw_markers:
+            summary = {
+                "total": len(raw_markers),
+                "unassigned": sum(1 for m in raw_markers if m.get("map_classification") == "UNASSIGNED"),
+                "waiting_to_start": sum(1 for m in raw_markers if m.get("map_classification") == "ASSIGNED"),
+                "out_for_delivery": sum(1 for m in raw_markers if m.get("map_classification") == "OUT_FOR_DELIVERY"),
+                "follow_up": sum(1 for m in raw_markers if m.get("map_classification") == "FOLLOW_UP"),
+                "delivered": sum(1 for m in raw_markers if m.get("map_classification") == "DELIVERED"),
+                "return_required": sum(1 for m in raw_markers if m.get("map_classification") == "RETURN_REQUIRED"),
+                "returned": sum(1 for m in raw_markers if m.get("map_classification") == "RETURNED")
+            }
+
+        # 8 Operational Position Counters (exact match with Screenshot 4)
+        total_cnt = summary.get("total", len(raw_markers))
+        unassign_cnt = summary.get("unassigned", 0)
+        waiting_cnt = summary.get("waiting_to_start", summary.get("assigned", 0))
+        out_cnt = summary.get("out_for_delivery", 0)
+        followup_cnt = summary.get("follow_up", 0)
+        delivered_cnt = summary.get("delivered", 0)
+        ret_req_cnt = summary.get("return_required", 0)
+        returned_cnt = summary.get("returned", 0)
+
+        st.markdown(f"""
+        <div class="live-counter-grid">
+            <div class="live-counter-pill">
+                <div class="live-counter-val">{total_cnt}</div>
+                <div class="live-counter-lbl">Total</div>
+            </div>
+            <div class="live-counter-pill">
+                <div class="live-counter-val">{unassign_cnt}</div>
+                <div class="live-counter-lbl">Unassigned</div>
+            </div>
+            <div class="live-counter-pill active" style="border-color:#2563eb;">
+                <div class="live-counter-val" style="color:#2563eb;">{waiting_cnt}</div>
+                <div class="live-counter-lbl" style="color:#2563eb;">Waiting to Start</div>
+            </div>
+            <div class="live-counter-pill" style="border-color:#15803d;">
+                <div class="live-counter-val" style="color:#15803d;">{out_cnt}</div>
+                <div class="live-counter-lbl" style="color:#15803d;">Out for Delivery</div>
+            </div>
+            <div class="live-counter-pill">
+                <div class="live-counter-val">{followup_cnt}</div>
+                <div class="live-counter-lbl">Follow-up</div>
+            </div>
+            <div class="live-counter-pill">
+                <div class="live-counter-val">{delivered_cnt}</div>
+                <div class="live-counter-lbl">Delivered</div>
+            </div>
+            <div class="live-counter-pill" style="border-color:#dc2626;">
+                <div class="live-counter-val" style="color:#dc2626;">{ret_req_cnt}</div>
+                <div class="live-counter-lbl" style="color:#dc2626;">Return Required</div>
+            </div>
+            <div class="live-counter-pill">
+                <div class="live-counter-val">{returned_cnt}</div>
+                <div class="live-counter-lbl">Returned</div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        # Filters Bar
+        f_col1, f_col2 = st.columns([2.5, 1.5])
+        lm_search = f_col1.text_input("🔍 Search bag, order number, customer, area", placeholder="Search orders...", key="lm_search_input")
+        classification_options = ["All Classifications"] + [v["label"] for v in LION_CLASSIFICATION_INFO.values()]
+        selected_classification = f_col2.selectbox("Filter Status", options=classification_options, key="lm_class_select")
+
+        # Filter markers
+        filtered_markers = []
+        for m in raw_markers:
+            m_class = m.get("map_classification", "")
+            class_info = LION_CLASSIFICATION_INFO.get(m_class, {"label": m_class, "color": "#64748b", "symbol": "•"})
+
+            if selected_classification != "All Classifications" and class_info["label"] != selected_classification:
+                continue
+
+            if lm_search:
+                q = lm_search.lower()
+                bag_str = str(m.get("bag_reference", "")).lower()
+                ord_str = str(m.get("order_reference", "")).lower()
+                part_str = str(m.get("partner_name", "")).lower()
+                area_str = str(m.get("effective_area", "") or m.get("area", "")).lower()
+                drv_str = str(m.get("driver_name", "")).lower()
+                if not any(q in s for s in (bag_str, ord_str, part_str, area_str, drv_str)):
+                    continue
+
+            filtered_markers.append(m)
+
+        # 2-Column Layout (Matching Screenshot 4)
+        col_list, col_live_map = st.columns([1.1, 2])
+
+        with col_list:
+            st.markdown(f"""
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+                <strong style="font-size:15px; color:#0f172a;">Orders ({len(filtered_markers)})</strong>
+                <span style="font-size:11px; color:#64748b;">Bag-first view</span>
+            </div>
+            """, unsafe_allow_html=True)
+
+            orders_html = []
+            for m in filtered_markers[:150]:
+                b_ref = m.get("bag_reference", "")
+                o_ref = m.get("order_reference", "")
+                p_name = m.get("partner_name", "")
+                area = m.get("effective_area") or m.get("area") or ""
+                zone = m.get("city_zone") or ""
+                em = m.get("emirate") or ""
+                loc_txt = " · ".join(dict.fromkeys(p for p in [area, zone, em] if p))
+                d_name = m.get("driver_name") or "Unassigned"
+                m_class = m.get("map_classification", "")
+                c_info = LION_CLASSIFICATION_INFO.get(m_class, {"label": m_class, "color": "#64748b", "symbol": "•"})
+
+                lat = m.get("latitude")
+                lon = m.get("longitude")
+                pin_url = f"https://www.google.com/maps?q={lat},{lon}" if lat and lon else "#"
+
+                orders_html.append(f"""
+                <div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:10px; padding:10px 12px; margin-bottom:8px;">
+                    <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:8px;">
+                        <div>
+                            <strong style="font-size:13px; color:#0f172a; font-family:'JetBrains Mono',monospace;">{html.escape(b_ref)}</strong><br>
+                            <span style="font-size:11px; color:#64748b;">{html.escape(o_ref)}</span>
+                        </div>
+                        <span class="status-pill-badge" style="background-color:{c_info['color']};">
+                            {c_info['symbol']} {c_info['label']}
+                        </span>
+                    </div>
+                    <div style="font-size:12px; font-weight:600; color:#334155; margin-top:4px;">{html.escape(p_name)}</div>
+                    <div style="font-size:11px; color:#64748b; margin-top:2px;">{html.escape(loc_txt)}</div>
+                    <div style="display:flex; justify-content:space-between; align-items:center; margin-top:6px; font-size:11px;">
+                        <span style="color:#475569; font-weight:600;">👤 {html.escape(d_name)}</span>
+                        <a href="{pin_url}" target="_blank" style="color:#2563eb; font-weight:700; text-decoration:none;">View Map ↗</a>
+                    </div>
+                </div>
+                """)
+
+            st.markdown(f'<div class="order-list-scroll-box">{"".join(orders_html)}</div>', unsafe_allow_html=True)
+            if len(filtered_markers) > 150:
+                st.caption(f"Showing first 150 of {len(filtered_markers)} orders in list (all plotted on map).")
+
+        with col_live_map:
+            live_map_stops = []
+            seen_lm_coords = {}
+            for idx, m in enumerate(filtered_markers):
+                lat = m.get("latitude")
+                lon = m.get("longitude")
+                if not lat or not lon:
+                    continue
+                try:
+                    f_lat = float(lat)
+                    f_lon = float(lon)
+                except ValueError:
+                    continue
+
+                ckey = (round(f_lat, 5), round(f_lon, 5))
+                dup = seen_lm_coords.get(ckey, 0)
+                seen_lm_coords[ckey] = dup + 1
+
+                m_class = m.get("map_classification", "")
+                c_info = LION_CLASSIFICATION_INFO.get(m_class, {"label": m_class, "color": "#64748b", "symbol": "•"})
+
+                pin_url = f"https://www.google.com/maps?q={f_lat},{f_lon}"
+                b_ref = m.get("bag_reference", "")
+                p_name = m.get("partner_name", "")
+                d_name = m.get("driver_name", "Unassigned")
+                area_txt = m.get("effective_area") or m.get("area") or ""
+
+                live_map_stops.append({
+                    "raw_lat": f_lat,
+                    "raw_lon": f_lon,
+                    "disp_lat": f_lat + (dup * 0.00014),
+                    "disp_lon": f_lon + (dup * 0.00014),
+                    "sequence": c_info["symbol"],
+                    "bag": f"{b_ref} ({c_info['label']})",
+                    "area": f"{p_name} • {area_txt} • {d_name}",
+                    "driver_name": d_name,
+                    "color": c_info["color"],
+                    "border_style": "2px solid #fff",
+                    "pin_url": pin_url
+                })
+
+            if live_map_stops:
+                lm_component_data = {
+                    "warehouse": {"lat": wh_lat, "lon": wh_lon, "label": "Ajman Warehouse Base"},
+                    "routes": [],
+                    "stops": live_map_stops,
+                    "excluded": [],
+                    "clear_drawing": False
+                }
+                _maplibre_component(map_data=lm_component_data, key="maplibre_live_operations_map", default=None)
+            else:
+                st.info("No orders with valid coordinates match the current filters.")
