@@ -3175,53 +3175,62 @@ with tab_active_work:
                 if all_orders:
                     bag_cards_html = []
                     for ord_item in all_orders:
-                        b_code = ord_item.get("bag_code", "")
-                        c_name = ord_item.get("customer_name", "")
-                        o_ref = ord_item.get("order_reference", "")
-                        stat = ord_item.get("status", "PENDING").replace("_", " ")
-                        bag_cards_html.append(f"""
-                        <div class="bag-tile-item">
-                            <div class="bag-tile-code">{html.escape(b_code)}</div>
-                            <div class="bag-tile-cust">{html.escape(c_name)}</div>
-                            <div class="bag-tile-ref">{html.escape(o_ref)} · <strong style="color:#d97706;">{html.escape(stat)}</strong></div>
-                        </div>
-                        """)
+                        b_code = str(ord_item.get("bag_code", "") or "")
+                        c_name = str(ord_item.get("customer_name", "") or "")
+                        o_ref = str(ord_item.get("order_reference", "") or "")
+                        stat = str(ord_item.get("status", "PENDING") or "").replace("_", " ")
+                        bag_cards_html.append(
+                            f'<div class="bag-tile-item">'
+                            f'<div class="bag-tile-code">{html.escape(b_code)}</div>'
+                            f'<div class="bag-tile-cust">{html.escape(c_name)}</div>'
+                            f'<div class="bag-tile-ref">{html.escape(o_ref)} · <strong style="color:#d97706;">{html.escape(stat)}</strong></div>'
+                            f'</div>'
+                        )
                     st.markdown(f'<div class="bag-tile-grid">{"".join(bag_cards_html)}</div>', unsafe_allow_html=True)
 
                 # Expandable run details and bag actions (Screenshot 2 & 3)
                 with st.expander(f"▼ Internal run details and Bag actions ({num_runs})"):
                     for run_idx, run_obj in enumerate(drv_runs):
-                        run_id = run_obj.get("id")
-                        run_code = run_obj.get("run_code", f"Run #{run_id}")
-                        run_status = run_obj.get("status", "IN_PROGRESS").replace("_", " ")
-                        rem_stops = run_obj.get("remaining_stops", 0)
+                        run_id = run_obj.get("id") or f"run_{run_idx}"
+                        run_family = run_obj.get("family", "DELIVERY")
+                        run_code = run_obj.get("reference") or run_obj.get("run_code") or f"Run #{run_id}"
+                        run_type = run_obj.get("type", "Delivery")
+                        run_status = str(run_obj.get("status", "IN_PROGRESS")).replace("_", " ")
+                        comp_stops = run_obj.get("completed_stops", 0)
                         tot_stops = run_obj.get("total_stops", len(run_obj.get("orders", [])))
 
                         r_col1, r_col2, r_col3 = st.columns([3, 1.2, 1.8])
-                        r_col1.markdown(f"""
-                        <div style="padding-top:4px;">
-                            <strong style="font-size:14px; color:#0f172a;">{html.escape(run_code)}</strong>
-                            <span style="font-size:12px; color:#64748b; margin-left:8px;">Run / route detail</span>
-                            <span class="lion-badge mode" style="margin-left:8px;">{html.escape(run_status)}</span>
-                            <span style="font-size:12px; font-weight:700; color:#334155; margin-left:8px;">{rem_stops}/{tot_stops} stops</span>
-                        </div>
-                        """, unsafe_allow_html=True)
+                        r_col1.markdown(
+                            f'<div style="padding-top:4px;">'
+                            f'<strong style="font-size:14px; color:#0f172a;">{html.escape(str(run_code))}</strong>'
+                            f'<span style="font-size:12px; color:#64748b; margin-left:8px;">{html.escape(str(run_type))} detail</span>'
+                            f'<span class="lion-badge mode" style="margin-left:8px;">{html.escape(str(run_status))}</span>'
+                            f'<span style="font-size:12px; font-weight:700; color:#334155; margin-left:8px;">{comp_stops}/{tot_stops} stops</span>'
+                            f'</div>',
+                            unsafe_allow_html=True
+                        )
 
-                        portal_link = f"https://app.liondelivery.ae/dispatcher/delivery-runs/{run_id}"
+                        if run_family == "DELIVERY":
+                            portal_link = f"https://app.liondelivery.ae/dispatcher/delivery-runs/{run_id}"
+                        elif run_family == "PICKUP":
+                            portal_link = f"https://app.liondelivery.ae/dispatcher/pickup-routes/{run_id}"
+                        else:
+                            portal_link = f"https://app.liondelivery.ae/dispatcher/delivery-runs/{run_id}"
+
                         r_col2.markdown(f'<a href="{portal_link}" target="_blank" class="nav-link-btn" style="width:100%; text-align:center;">View Details ↗</a>', unsafe_allow_html=True)
 
-                        view_stops_key = f"view_stops_{run_id}_{drv_name}"
+                        view_stops_key = f"view_stops_{d_idx}_{run_idx}_{run_id}"
                         toggle_reassign = r_col3.toggle("Reassign Eligible Bags", key=view_stops_key)
 
                         if toggle_reassign:
-                            st.markdown(f"""
-                            <div style="background:#fffbeb; border:1px solid #fde68a; border-radius:10px; padding:12px; margin-top:10px; margin-bottom:10px;">
-                                <strong style="color:#92400e; font-size:13px;">Eligible Bags in {html.escape(run_code)}</strong>
-                                <p style="font-size:11.5px; color:#78350f; margin:2px 0 0 0;">
-                                    Select untouched Bags only. Custody, attempts, completed work and returns remain locked.
-                                </p>
-                            </div>
-                            """, unsafe_allow_html=True)
+                            st.markdown(
+                                f'<div style="background:#fffbeb; border:1px solid #fde68a; border-radius:10px; padding:12px; margin-top:10px; margin-bottom:10px;">'
+                                f'<strong style="color:#92400e; font-size:13px;">Eligible Bags in {html.escape(str(run_code))}</strong>'
+                                f'<p style="font-size:11.5px; color:#78350f; margin:2px 0 0 0;">'
+                                f'Select untouched Bags only. Custody, attempts, completed work and returns remain locked.'
+                                f'</p></div>',
+                                unsafe_allow_html=True
+                            )
 
                             cache_run_key = f"run_stops_{run_id}"
                             if cache_run_key not in st.session_state:
@@ -3301,7 +3310,7 @@ with tab_active_work:
                                         "Select Untouched Bags to Move",
                                         options=list(eligible_stop_options.keys()),
                                         format_func=lambda sid: eligible_stop_options[sid],
-                                        key=f"re_stops_{run_id}"
+                                        key=f"re_stops_{d_idx}_{run_idx}_{run_id}"
                                     )
                                     target_drivers_opts = [
                                         d for d in fleet_workload
@@ -3311,11 +3320,11 @@ with tab_active_work:
                                         "Move To Target Driver",
                                         options=target_drivers_opts,
                                         format_func=lambda d: f"{d.get('driver_name', '')} ({d.get('total_active_tasks', 0)} active tasks)",
-                                        key=f"re_target_{run_id}"
+                                        key=f"re_target_{d_idx}_{run_idx}_{run_id}"
                                     )
-                                    reason_txt = re_col1.text_input("Reassignment Reason", value="Dispatcher manual route balancing", key=f"re_reason_{run_id}")
+                                    reason_txt = re_col1.text_input("Reassignment Reason", value="Dispatcher manual route balancing", key=f"re_reason_{d_idx}_{run_idx}_{run_id}")
 
-                                    if re_col3.button("⚡ Execute Reassignment", key=f"re_exec_{run_id}", disabled=not selected_reassign_stops):
+                                    if re_col3.button("⚡ Execute Reassignment", key=f"re_exec_{d_idx}_{run_idx}_{run_id}", disabled=not selected_reassign_stops):
                                         if selected_reassign_stops and target_drv_choice:
                                             tgt_id = target_drv_choice.get("driver_id")
                                             with st.spinner("Executing reassignment on Lion Delivery API..."):
