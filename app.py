@@ -1925,19 +1925,6 @@ else:
 
 route_line_opacity = st.sidebar.slider("Driver Route Line Opacity", min_value=0.2, max_value=1.0, value=0.88, step=0.1)
 
-st.sidebar.markdown("### 📂 1. Load Delivery Orders")
-data_source = st.sidebar.radio(
-    "Input Method:",
-    ["Upload CSV File", "⚡ Live API Sync (location-board)"],
-    index=0
-)
-
-raw_rows = []
-fieldnames = ["Bag_Number", "Map_URL", "Latitude", "Longitude", "Area", "Customer", "Phone", "Bags"]
-bag_col = "Bag_Number"
-source_name = "manual_csv"
-raw_bytes_len = 0
-
 # ----------------------------------------------------
 # LION DELIVERY PORTAL CREDENTIALS & API SESSION
 # ----------------------------------------------------
@@ -2007,7 +1994,8 @@ st.sidebar.markdown("### 📂 1. Load Delivery Orders (Planner)")
 data_source = st.sidebar.radio(
     "Input Method:",
     ["Upload CSV File", "⚡ Live API Sync (location-board)"],
-    index=0
+    index=0,
+    key="planner_data_source_radio"
 )
 
 raw_rows = []
